@@ -577,24 +577,26 @@ class SheetConfig {
  *   .pipe(res);
  */
 class OracleSqlToExcelBuilder {
-  /** @private */ _connectionFactory : (() => Promise<OracleConnection>) | null;
-  /** @private */ _executeOptions    : Record<string, unknown>;
-  /** @private */ _outputDir         : string;
-  /** @private */ _filePrefix        : string;
-  /** @private */ _compress          : boolean;
-  /** @private */ _debug             : boolean;
-  /** @private */ _onProgressCb      : ((info: ProgressInfo) => void) | null;
-  /** @private */ _sheets            : SheetConfig[];
+  /** @private */ _connectionFactory      : (() => Promise<OracleConnection>) | null;
+  /** @private */ _executeOptions         : Record<string, unknown>;
+  /** @private */ _outputDir              : string;
+  /** @private */ _filePrefix             : string;
+  /** @private */ _compress               : boolean;
+  /** @private */ _debug                  : boolean;
+  /** @private */ _onProgressCb           : ((info: ProgressInfo) => void) | null;
+  /** @private */ _sheets                 : SheetConfig[];
+  /** @private */ _backpressureThreshold  : number;
 
   constructor() {
-    this._connectionFactory = null;
-    this._executeOptions    = {};
-    this._outputDir         = process.cwd();
-    this._filePrefix        = 'export';
-    this._compress          = false;
-    this._debug             = false;
-    this._onProgressCb      = null;
-    this._sheets            = [];
+    this._connectionFactory     = null;
+    this._executeOptions        = {};
+    this._outputDir             = process.cwd();
+    this._filePrefix            = 'export';
+    this._compress              = false;
+    this._debug                 = false;
+    this._onProgressCb          = null;
+    this._sheets                = [];
+    this._backpressureThreshold = 16 * 1024 * 1024; // 16 MB
   }
 
   // ── Workbook-level methods ─────────────────────────────────────────────────
@@ -647,6 +649,18 @@ class OracleSqlToExcelBuilder {
    * .compress(true)   // smaller file — recommended for .run() to disk
    */
   compress(value = true): this { this._compress = value; return this; }
+
+  /**
+   * Maximum number of bytes buffered in the output stream before the Oracle fetch is paused.
+   * Only applies when using `.pipe(stream)`. When the stream's `writableLength` exceeds this
+   * value, the library waits for the stream to drain before fetching the next Oracle batch.
+   * Has no effect for `.run()` (file) or `.toBuffer()`.
+   * @param bytes - OPTIONAL. Default: `16777216` (16 MB).
+   *
+   * @example
+   * .backpressureThreshold(8 * 1024 * 1024)  // pause when 8 MB buffered
+   */
+  backpressureThreshold(bytes: number): this { this._backpressureThreshold = bytes; return this; }
 
   /**
    * Enable verbose debug logging to `console.log` at each execution stage.
@@ -706,7 +720,8 @@ class OracleSqlToExcelBuilder {
     connection  : OracleConnection,
     workbook    : StreamWorkbook,
     sheetCfg    : SheetConfig,
-    progressCtx : ProgressCtx
+    progressCtx : ProgressCtx,
+    drainFn?    : (() => Promise<void>) | null
   ): Promise<{ sheetNames: string[]; skippedRows: number }> {
     const sheetNames                            : string[]          = [];
     let   sheetIndex                                                = 0;
@@ -910,6 +925,8 @@ class OracleSqlToExcelBuilder {
           this._onProgressCb({ sheet: label, rowsWritten: totalRows, skippedRows, totalRowsWritten: progressCtx.totalRowsWritten });
         }
 
+        if (drainFn) await drainFn();
+
         rows = await resultSet!.getRows(sheetCfg._fetchSize);
         dbg(`getRows → ${rows.length} row(s) (totalRows=${totalRows})`);
       }
@@ -997,6 +1014,20 @@ class OracleSqlToExcelBuilder {
       connection = await this._connectionFactory!();
       dbg('getConnection OK');
 
+      const targetStream = workbookTarget.stream ?? null;
+      const threshold    = this._backpressureThreshold;
+      const drainFn: (() => Promise<void>) | null = targetStream
+        ? async () => {
+            if (targetStream.writableLength <= threshold && !targetStream.writableNeedDrain) return;
+            await new Promise<void>((resolve) => {
+              const done = () => resolve();
+              targetStream.once('drain', done);
+              const t = setTimeout(done, 30_000);
+              if (typeof (t as NodeJS.Timeout).unref === 'function') (t as NodeJS.Timeout).unref();
+            });
+          }
+        : null;
+
       workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
         ...workbookTarget,
         useStyles       : true,
@@ -1007,7 +1038,7 @@ class OracleSqlToExcelBuilder {
       } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
 
       for (const sheetCfg of sheets) {
-        const { sheetNames, skippedRows } = await this._executeSheet(connection, workbook, sheetCfg, progressCtx);
+        const { sheetNames, skippedRows } = await this._executeSheet(connection, workbook, sheetCfg, progressCtx, drainFn);
         allSheets.push(...sheetNames);
         totalSkipped += skippedRows;
       }

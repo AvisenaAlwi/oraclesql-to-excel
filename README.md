@@ -126,6 +126,7 @@ Returns a new `OracleSqlToExcelBuilder` instance. All methods are chainable.
 | `.compress(bool)` | `false` | Enable XLSX ZIP compression. Slower but smaller file. Recommended for `.run()`, not `.pipe()`. |
 | `.debug(bool)` | `false` | Verbose logging. Active only when `NODE_ENV` is not `production`. |
 | `.onProgress(cb)` | — | Called after each fetch batch. See [Progress Tracking](#progress-tracking-websocket--sse). |
+| `.backpressureThreshold(bytes)` | `16777216` (16 MB) | Pause Oracle fetch when the output stream buffer exceeds this size. Only applies to `.pipe()`. See [Backpressure & Memory](#backpressure--memory-pipe-only). |
 | `.sheet(name, fn)` | — | Add a sheet. `name` can be a string or array of strings. |
 
 #### Terminal methods
@@ -555,6 +556,33 @@ s.sql('SELECT * FROM T', {}, { autoCommit: false })
 
 ---
 
+### Backpressure & Memory (`.pipe()` only)
+
+When streaming to an HTTP response with `.pipe(res)`, the Oracle fetch loop runs much faster than a client can download. Without backpressure control, row XML accumulates in Node.js stream buffers — for exports with millions of rows this can easily exhaust process memory.
+
+The library handles this automatically: after each Oracle fetch batch, it checks the output stream's `writableLength`. If it exceeds the threshold, it pauses and waits for the stream to drain before fetching the next batch.
+
+**Default threshold is 16 MB.** Adjust with `.backpressureThreshold()`:
+
+```js
+// Lower threshold — pause sooner, less memory pressure, slightly slower throughput
+OracleSqlToExcel()
+  .connectionFactory(() => pool.getConnection())
+  .backpressureThreshold(8 * 1024 * 1024)   // pause at 8 MB
+  .sheet('Data', s => s.sql(SQL).columns(COLS))
+  .pipe(res);
+
+// Higher threshold — pause less often, higher throughput, more peak memory allowed
+OracleSqlToExcel()
+  .backpressureThreshold(32 * 1024 * 1024)  // pause at 32 MB
+  .sheet('Data', s => s.sql(SQL).columns(COLS))
+  .pipe(res);
+```
+
+> **Note:** `.backpressureThreshold()` has no effect on `.run()` (file writes drain naturally) or `.toBuffer()` (all data is intentionally collected in memory).
+
+---
+
 ## Requirements
 
 | Dependency | Version |
@@ -562,6 +590,12 @@ s.sql('SELECT * FROM T', {}, { autoCommit: false })
 | Node.js    | >= 14.0.0 |
 | exceljs    | >= 4.x |
 | oracledb   | >= 5.x (peer) |
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ---
 
