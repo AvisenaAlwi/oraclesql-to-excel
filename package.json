@@ -1,0 +1,67 @@
+{
+  "name": "@avisenaalwi/oraclesql-to-excel",
+  "version": "1.0.0",
+  "description": "Stream Oracle SQL query results directly into Excel (.xlsx) files. Supports multi-sheet, split sheets, doc headers, streaming to HTTP/Buffer, and more.",
+  "main": "./dist/index.js",
+  "module": "./index.mjs",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "index.mjs",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "jest",
+    "test:coverage": "jest --coverage"
+  },
+  "keywords": [
+    "oracle",
+    "oracledb",
+    "sql",
+    "excel",
+    "xlsx",
+    "exceljs",
+    "stream",
+    "export"
+  ],
+  "author": {
+    "name": "Avisena Alwi",
+    "email": "avisena.abdillah98@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AvisenaAlwi/oraclesql-to-excel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AvisenaAlwi/oraclesql-to-excel/issues"
+  },
+  "homepage": "https://github.com/AvisenaAlwi/oraclesql-to-excel#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "peerDependencies": {
+    "oracledb": ">=5.0.0"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^25.9.1",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
+    "typescript": "^5.0.0"
+  }
+}
