@@ -1015,18 +1015,60 @@ class OracleSqlToExcelBuilder {
       dbg('getConnection OK');
 
       const targetStream = workbookTarget.stream ?? null;
-      const threshold    = this._backpressureThreshold;
-      const drainFn: (() => Promise<void>) | null = targetStream
-        ? async () => {
-            if (targetStream.writableLength <= threshold && !targetStream.writableNeedDrain) return;
-            await new Promise<void>((resolve) => {
-              const done = () => resolve();
-              targetStream.once('drain', done);
-              const t = setTimeout(done, 30_000);
-              if (typeof (t as NodeJS.Timeout).unref === 'function') (t as NodeJS.Timeout).unref();
-            });
+      let drainFn: (() => Promise<void>) | null = null;
+
+      if (targetStream) {
+        let needsDrain      = false;
+        let bytesSinceDrain = 0;
+        let streamAborted   = false;
+        const threshold     = this._backpressureThreshold;
+
+        // Intercept write() with two complementary signals:
+        // 1. write() returns false — Node.js authoritative backpressure signal
+        //    (writableLength / writableNeedDrain only see the final stream buffer,
+        //    missing data already queued in ExcelJS's internal archiver).
+        // 2. bytesSinceDrain >= threshold — proactive pause before TCP buffer fills,
+        //    catching slow clients early even before write() returns false.
+        const origWrite = targetStream.write.bind(targetStream);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (targetStream as any).write = (...args: any[]): boolean => {
+          if (streamAborted) return false;
+          const chunk = args[0];
+          if (chunk != null) {
+            bytesSinceDrain += Buffer.isBuffer(chunk)
+              ? chunk.length
+              : typeof chunk === 'string'
+                ? Buffer.byteLength(chunk, typeof args[1] === 'string' ? args[1] as BufferEncoding : 'utf8')
+                : 0;
           }
-        : null;
+          try {
+            const ok: boolean = (origWrite as (...a: any[]) => boolean)(...args);
+            if (!ok || bytesSinceDrain >= threshold) needsDrain = true;
+            return ok;
+          } catch {
+            streamAborted = true;
+            return false;
+          }
+        };
+
+        targetStream.on('drain', () => { needsDrain = false; bytesSinceDrain = 0; });
+        targetStream.on('close', () => { streamAborted = true; });
+        targetStream.on('error', () => { streamAborted = true; });
+
+        drainFn = async () => {
+          if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
+          if (!needsDrain) return;
+          await new Promise<void>((resolve, reject) => {
+            const done  = () => resolve();
+            const abort = () => reject(new Error('Client disconnected — output stream closed mid-export'));
+            targetStream.once('drain', done);
+            targetStream.once('close', abort);
+            targetStream.once('error', abort);
+            const t = setTimeout(done, 30_000);
+            if (typeof (t as NodeJS.Timeout).unref === 'function') (t as NodeJS.Timeout).unref();
+          });
+        };
+      }
 
       workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
         ...workbookTarget,

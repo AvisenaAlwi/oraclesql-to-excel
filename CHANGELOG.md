@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.1] - 2026-05-26
+
+### Fixed
+
+- **Backpressure check was using the wrong signal** — `v1.1.0` checked `writableLength` on the output stream (`res`), but data actually accumulates in ExcelJS's internal archiver buffer which sits upstream of `res`. This caused the check to never trigger and memory still grew unboundedly on slow clients.
+
+  The fix intercepts `write()` on the output stream directly. When `write()` returns `false` — Node.js's authoritative backpressure signal — the Oracle fetch is paused until the stream drains.
+
+- **Client disconnect leaked Oracle connection for up to 30 seconds** — when a browser cancelled a download mid-stream, the `drain` event never fired, and the export continued fetching from Oracle until the 30-second safety timeout. The stream `close` and `error` events now abort the fetch immediately, closing the Oracle connection and result set right away.
+
+---
+
 ## [1.1.0] - 2026-05-26
 
 ### Fixed
