@@ -596,7 +596,7 @@ class OracleSqlToExcelBuilder {
     this._debug                 = false;
     this._onProgressCb          = null;
     this._sheets                = [];
-    this._backpressureThreshold = 16 * 1024 * 1024; // 16 MB
+    this._backpressureThreshold = 512 * 1024 * 1024; // 512 MB
   }
 
   // ── Workbook-level methods ─────────────────────────────────────────────────
@@ -651,12 +651,20 @@ class OracleSqlToExcelBuilder {
   compress(value = true): this { this._compress = value; return this; }
 
   /**
-   * @deprecated No-op since v1.1.2. Kept for API compatibility.
+   * Maximum process RSS (Resident Set Size) allowed during `.pipe()` streaming before the
+   * Oracle fetch is paused. When `process.memoryUsage().rss` exceeds this value after a batch,
+   * the library polls every 200 ms and waits until RSS drops below the threshold before
+   * fetching the next Oracle batch.
    *
-   * Backpressure is now driven entirely by `write()` returning `false` — the authoritative
-   * Node.js signal — combined with a drain loop that fully empties the archiver buffer before
-   * fetching the next Oracle batch. A byte threshold is no longer needed and was removed
-   * because it could trigger false-positive drain waits when no actual backpressure existed.
+   * This guards against memory exhaustion when the output stream is behind a reverse proxy
+   * (e.g. nginx) — where Node.js `write()` never returns `false` even though the end client
+   * is downloading slowly and data is accumulating in the Node.js output buffer.
+   *
+   * Has no effect for `.run()` (file) or `.toBuffer()`.
+   * @param bytes - Default: `536870912` (512 MB).
+   *
+   * @example
+   * .backpressureThreshold(256 * 1024 * 1024)  // pause when RSS exceeds 256 MB
    */
   backpressureThreshold(bytes: number): this { this._backpressureThreshold = bytes; return this; }
 
@@ -1041,13 +1049,14 @@ class OracleSqlToExcelBuilder {
         targetStream.on('close', () => { streamAborted = true; });
         targetStream.on('error', () => { streamAborted = true; });
 
+        const rssThreshold = this._backpressureThreshold;
+
         drainFn = async () => {
           if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
-          if (!needsDrain) return;
 
-          // Loop: after each TCP drain the archiver may immediately flush queued data back
-          // into the stream, re-triggering needsDrain. Keep waiting until the archiver is
-          // truly empty (no new writes arrive in one event-loop turn after drain).
+          // Primary: event-driven drain loop.
+          // write() returning false is the authoritative Node.js backpressure signal.
+          // Loop because after each TCP drain the archiver may immediately re-fill the stream.
           while (needsDrain && !streamAborted) {
             await new Promise<void>((resolve, reject) => {
               if (!needsDrain || streamAborted) { resolve(); return; }
@@ -1068,10 +1077,21 @@ class OracleSqlToExcelBuilder {
               if (typeof (t as NodeJS.Timeout).unref === 'function') (t as NodeJS.Timeout).unref();
             });
 
-            // Yield one event-loop turn so the archiver can write any pending
-            // buffered data to the stream and potentially re-set needsDrain
             if (!streamAborted) await new Promise<void>(r => setImmediate(r));
           }
+
+          // Fallback: RSS-based polling.
+          // When the output stream is behind a reverse proxy (nginx etc.), write() always
+          // returns true (proxy accepts data instantly) so the drain loop above never fires.
+          // Data still accumulates in Node.js's outputData buffer, growing process RSS.
+          // Polling RSS directly works regardless of proxy topology.
+          if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
+          const started = Date.now();
+          while (process.memoryUsage().rss > rssThreshold && !streamAborted) {
+            if (Date.now() - started > 30_000) break;
+            await new Promise<void>(r => setTimeout(r, 200));
+          }
+          if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
         };
       }
 

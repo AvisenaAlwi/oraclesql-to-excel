@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.3] - 2026-05-28
+
+### Fixed
+
+- **Memory still grew linearly behind a reverse proxy** — when Node.js is behind nginx or any reverse proxy, the proxy accepts data from Node.js instantly (local socket), so `write()` on the output stream always returns `true`. The event-driven drain loop introduced in `v1.1.2` never triggered. Data accumulated in Node.js's internal `outputData` buffer (visible as RSS growth) while the proxy slowly forwarded data to the slow end client.
+
+  Added a second, RSS-based fallback: after each Oracle fetch batch the library checks `process.memoryUsage().rss`. If it exceeds the configured threshold, it polls every 200 ms and waits until RSS drops before fetching the next batch. This approach works regardless of proxy topology because it monitors the process's own memory, not stream events.
+
+### Changed
+
+- **`.backpressureThreshold(bytes)` is no longer a no-op** — repurposed as the RSS threshold for the polling fallback. Default changed from `16 MB` to `512 MB`. Set lower if your PM2 `--max-memory-restart` limit is below 1 GB.
+
+---
+
 ## [1.1.2] - 2026-05-28
 
 ### Fixed
