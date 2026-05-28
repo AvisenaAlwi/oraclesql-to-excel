@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.4] - 2026-05-28
+
+### Fixed
+
+- **`.run()` had no RSS throttling** — the RSS-based polling introduced in `v1.1.3` only applied to `.pipe()`. When using `.run()` (write to file), `drainFn` was always `null` and memory grew unchecked. On slow container storage (OpenShift overlay filesystem, network PVC) the archiver buffer accumulates data at the same rate as the `.pipe()` + reverse proxy case.
+
+  RSS polling is now also applied for `.run()`: when `process.memoryUsage().rss` exceeds the configured threshold, the Oracle fetch pauses until disk writes drain the buffer and RSS drops.
+
+---
+
 ## [1.1.3] - 2026-05-28
 
 ### Fixed

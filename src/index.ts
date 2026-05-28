@@ -1093,6 +1093,20 @@ class OracleSqlToExcelBuilder {
           }
           if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
         };
+      } else {
+        // run() to file: no stream reference available, use RSS-only polling.
+        // On slow storage (container overlay, network PVC) the archiver buffer
+        // accumulates the same way as the pipe() case. RSS drops as disk writes
+        // complete and Node.js releases the buffers.
+        const rssThreshold = this._backpressureThreshold;
+        drainFn = async () => {
+          if (process.memoryUsage().rss <= rssThreshold) return;
+          const started = Date.now();
+          while (process.memoryUsage().rss > rssThreshold) {
+            if (Date.now() - started > 30_000) break;
+            await new Promise<void>(r => setTimeout(r, 200));
+          }
+        };
       }
 
       workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
