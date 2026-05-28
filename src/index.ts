@@ -651,14 +651,12 @@ class OracleSqlToExcelBuilder {
   compress(value = true): this { this._compress = value; return this; }
 
   /**
-   * Maximum number of bytes buffered in the output stream before the Oracle fetch is paused.
-   * Only applies when using `.pipe(stream)`. When the stream's `writableLength` exceeds this
-   * value, the library waits for the stream to drain before fetching the next Oracle batch.
-   * Has no effect for `.run()` (file) or `.toBuffer()`.
-   * @param bytes - OPTIONAL. Default: `16777216` (16 MB).
+   * @deprecated No-op since v1.1.2. Kept for API compatibility.
    *
-   * @example
-   * .backpressureThreshold(8 * 1024 * 1024)  // pause when 8 MB buffered
+   * Backpressure is now driven entirely by `write()` returning `false` — the authoritative
+   * Node.js signal — combined with a drain loop that fully empties the archiver buffer before
+   * fetching the next Oracle batch. A byte threshold is no longer needed and was removed
+   * because it could trigger false-positive drain waits when no actual backpressure existed.
    */
   backpressureThreshold(bytes: number): this { this._backpressureThreshold = bytes; return this; }
 
@@ -1018,32 +1016,20 @@ class OracleSqlToExcelBuilder {
       let drainFn: (() => Promise<void>) | null = null;
 
       if (targetStream) {
-        let needsDrain      = false;
-        let bytesSinceDrain = 0;
-        let streamAborted   = false;
-        const threshold     = this._backpressureThreshold;
+        let needsDrain    = false;
+        let streamAborted = false;
 
-        // Intercept write() with two complementary signals:
-        // 1. write() returns false — Node.js authoritative backpressure signal
-        //    (writableLength / writableNeedDrain only see the final stream buffer,
-        //    missing data already queued in ExcelJS's internal archiver).
-        // 2. bytesSinceDrain >= threshold — proactive pause before TCP buffer fills,
-        //    catching slow clients early even before write() returns false.
+        // Intercept write() to capture the authoritative Node.js backpressure signal.
+        // writableLength / writableNeedDrain only reflect the final stream buffer and
+        // miss data already queued in ExcelJS's internal archiver. write() returning
+        // false is the correct signal that downstream cannot accept more data.
         const origWrite = targetStream.write.bind(targetStream);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (targetStream as any).write = (...args: any[]): boolean => {
           if (streamAborted) return false;
-          const chunk = args[0];
-          if (chunk != null) {
-            bytesSinceDrain += Buffer.isBuffer(chunk)
-              ? chunk.length
-              : typeof chunk === 'string'
-                ? Buffer.byteLength(chunk, typeof args[1] === 'string' ? args[1] as BufferEncoding : 'utf8')
-                : 0;
-          }
           try {
             const ok: boolean = (origWrite as (...a: any[]) => boolean)(...args);
-            if (!ok || bytesSinceDrain >= threshold) needsDrain = true;
+            if (!ok) needsDrain = true;
             return ok;
           } catch {
             streamAborted = true;
@@ -1051,22 +1037,41 @@ class OracleSqlToExcelBuilder {
           }
         };
 
-        targetStream.on('drain', () => { needsDrain = false; bytesSinceDrain = 0; });
+        targetStream.on('drain', () => { needsDrain = false; });
         targetStream.on('close', () => { streamAborted = true; });
         targetStream.on('error', () => { streamAborted = true; });
 
         drainFn = async () => {
           if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
           if (!needsDrain) return;
-          await new Promise<void>((resolve, reject) => {
-            const done  = () => resolve();
-            const abort = () => reject(new Error('Client disconnected — output stream closed mid-export'));
-            targetStream.once('drain', done);
-            targetStream.once('close', abort);
-            targetStream.once('error', abort);
-            const t = setTimeout(done, 30_000);
-            if (typeof (t as NodeJS.Timeout).unref === 'function') (t as NodeJS.Timeout).unref();
-          });
+
+          // Loop: after each TCP drain the archiver may immediately flush queued data back
+          // into the stream, re-triggering needsDrain. Keep waiting until the archiver is
+          // truly empty (no new writes arrive in one event-loop turn after drain).
+          while (needsDrain && !streamAborted) {
+            await new Promise<void>((resolve, reject) => {
+              if (!needsDrain || streamAborted) { resolve(); return; }
+
+              const cleanup = () => {
+                targetStream.removeListener('drain', onDrain);
+                targetStream.removeListener('close', onAbort);
+                targetStream.removeListener('error', onAbort);
+              };
+              const onDrain = () => { cleanup(); resolve(); };
+              const onAbort = () => { cleanup(); reject(new Error('Client disconnected — output stream closed mid-export')); };
+
+              targetStream.on('drain', onDrain);
+              targetStream.on('close', onAbort);
+              targetStream.on('error', onAbort);
+
+              const t = setTimeout(() => { cleanup(); resolve(); }, 30_000);
+              if (typeof (t as NodeJS.Timeout).unref === 'function') (t as NodeJS.Timeout).unref();
+            });
+
+            // Yield one event-loop turn so the archiver can write any pending
+            // buffered data to the stream and potentially re-set needsDrain
+            if (!streamAborted) await new Promise<void>(r => setImmediate(r));
+          }
         };
       }
 

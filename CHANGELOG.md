@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.2] - 2026-05-28
+
+### Fixed
+
+- **Archiver buffer accumulation not fully drained between batches** — `v1.1.1` waited for one `drain` event on the output stream before fetching the next Oracle batch. However, after a TCP `drain`, the ExcelJS internal archiver immediately flushes its own queued data back into the stream, re-filling the buffer. This cycle meant only one TCP buffer's worth of data (~4–8 MB) was drained per batch pause, while the archiver continued to accumulate. Over many batches this still caused out-of-memory on slow clients.
+
+  The drain wait is now a loop: after each `drain` event the code yields one event-loop turn (via `setImmediate`) to let the archiver flush pending data, then checks for backpressure again. The loop exits only when no new data arrives in one turn — meaning the archiver is truly empty and the next Oracle fetch can safely begin.
+
+- **`bytesSinceDrain` threshold could trigger false-positive drain waits** — the proactive byte-count check introduced in `v1.1.0` set `needsDrain = true` based on bytes written since last drain, even when `write()` was still returning `true` (no actual backpressure). With the drain loop now in place, this check is unnecessary and was removed. Backpressure detection now relies solely on `write()` returning `false`, which is the authoritative Node.js signal.
+
+### Deprecated
+
+- **`.backpressureThreshold(bytes)`** — now a no-op. Kept for API compatibility with `v1.1.0`. See fix above.
+
+---
+
 ## [1.1.1] - 2026-05-26
 
 ### Fixed
