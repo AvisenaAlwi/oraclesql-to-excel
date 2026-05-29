@@ -1308,7 +1308,7 @@ class OracleSqlToExcelBuilder {
             if (process.memoryUsage().rss <= rssThreshold) return;
             const started = Date.now();
             while (process.memoryUsage().rss > rssThreshold) {
-              if (Date.now() - started > 30_000) break;
+              if (Date.now() - started > 10_000) break;
               await new Promise<void>(r => setTimeout(r, 200));
             }
           }
@@ -1646,7 +1646,7 @@ class OracleSqlToExcelBuilder {
               targetStream.on('close', onAbort);
               targetStream.on('error', onAbort);
 
-              const t = setTimeout(() => { cleanup(); resolve(); }, 30_000);
+              const t = setTimeout(() => { cleanup(); resolve(); }, 10_000);
               if (typeof (t as NodeJS.Timeout).unref === 'function') (t as NodeJS.Timeout).unref();
             });
 
@@ -1661,7 +1661,7 @@ class OracleSqlToExcelBuilder {
           if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
           const started = Date.now();
           while (process.memoryUsage().rss > rssThreshold && !streamAborted) {
-            if (Date.now() - started > 30_000) break;
+            if (Date.now() - started > 10_000) break;
             await new Promise<void>(r => setTimeout(r, 200));
           }
           if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
@@ -1676,7 +1676,7 @@ class OracleSqlToExcelBuilder {
           if (process.memoryUsage().rss <= rssThreshold) return;
           const started = Date.now();
           while (process.memoryUsage().rss > rssThreshold) {
-            if (Date.now() - started > 30_000) break;
+            if (Date.now() - started > 10_000) break;
             await new Promise<void>(r => setTimeout(r, 200));
           }
         };
@@ -1733,7 +1733,7 @@ class OracleSqlToExcelBuilder {
             if (process.memoryUsage().rss <= rssThreshold) return;
             const started = Date.now();
             while (process.memoryUsage().rss > rssThreshold) {
-              if (Date.now() - started > 30_000) break;
+              if (Date.now() - started > 10_000) break;
               await new Promise<void>((r) => setTimeout(r, 200));
             }
           }
@@ -1797,7 +1797,7 @@ class OracleSqlToExcelBuilder {
             if (process.memoryUsage().rss <= rssThreshold) return;
             const started = Date.now();
             while (process.memoryUsage().rss > rssThreshold) {
-              if (Date.now() - started > 30_000) break;
+              if (Date.now() - started > 10_000) break;
               await new Promise<void>((r) => setTimeout(r, 200));
             }
           }
