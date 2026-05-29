@@ -54,4 +54,9 @@ describe('OracleSqlToExcelBuilder — validation', () => {
       .sheet('S', (s) => s.sql('SELECT 1 FROM DUAL').freezeHeader().autoFilter());
     expect(builder).toBeDefined();
   });
+
+  it('backpressureThreshold default is 256 MB', () => {
+    const builder = OracleSqlToExcel() as any;
+    expect(builder._backpressureThreshold).toBe(256 * 1024 * 1024);
+  });
 });

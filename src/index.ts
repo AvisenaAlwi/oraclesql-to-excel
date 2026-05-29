@@ -680,7 +680,7 @@ class OracleSqlToExcelBuilder {
     this._onProgressCb          = null;
     this._sheets                = [];
     this._files                 = [];
-    this._backpressureThreshold = 512 * 1024 * 1024; // 512 MB
+    this._backpressureThreshold = 256 * 1024 * 1024; // 256 MB
     this._asZip                 = false;
   }
 
