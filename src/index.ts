@@ -1696,7 +1696,33 @@ class OracleSqlToExcelBuilder {
    * Execute and write the workbook to an `.xlsx` file on disk.
    * Deletes the partial file automatically if an error occurs mid-export.
    */
-  async run(): Promise<RunResult | MultiRunResult> {
+  async run(): Promise<RunResult | MultiRunResult | ZipRunResult> {
+    // ── ZIP path ────────────────────────────────────────────────────────────────
+    if (this._files.length > 0 && this._asZip) {
+      const zipFile = path.join(this._outputDir, `${this._filePrefix}.zip`);
+      const ws      = fs.createWriteStream(zipFile);
+      const wsDone  = new Promise<void>((resolve, reject) => {
+        ws.on('finish', resolve);
+        ws.on('error',  reject);
+      });
+      const rssThreshold = this._backpressureThreshold;
+      const drainFn: (() => Promise<void>) | null = rssThreshold > 0
+        ? async () => {
+            if (process.memoryUsage().rss <= rssThreshold) return;
+            const started = Date.now();
+            while (process.memoryUsage().rss > rssThreshold) {
+              if (Date.now() - started > 30_000) break;
+              await new Promise<void>((r) => setTimeout(r, 200));
+            }
+          }
+        : null;
+      const result = await this._executeAsZip(ws, drainFn);
+      await wsDone.catch(() => {});
+      if (!result.success) {
+        fs.promises.unlink(zipFile).catch(() => {});
+      }
+      return { ...result, file: zipFile } as ZipRunResult;
+    }
     if (this._files.length > 0) {
       if (this._files.length === 1) {
         return this._executeFileConfig(this._files[0]);

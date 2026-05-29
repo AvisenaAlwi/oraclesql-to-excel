@@ -227,3 +227,96 @@ describe('pipe() + asZip()', () => {
     }
   });
 });
+
+// ── run + asZip ───────────────────────────────────────────────────────────────
+
+describe('run() + asZip()', () => {
+  const rows    = makeRows(5);
+  const factory = () => Promise.resolve(createStreamConn(rows, COLS.map((c) => ({ name: c.key }))));
+
+  it('writes a .zip file to outputDir and returns ZipRunResult', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ote-zip-'));
+    const result: any = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .outputDir(tmpDir)
+      .filePrefix('export')
+      .file('rep', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .run();
+
+    expect(result.success).toBe(true);
+    expect(result.file).toBe(path.join(tmpDir, 'export.zip'));
+    expect(fs.existsSync(result.file)).toBe(true);
+
+    const zipBuffer = fs.readFileSync(result.file);
+    const entries   = readZipBuffer(zipBuffer);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].name).toBe('rep_1.xlsx');
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('ZIP contains correct XLSX data', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ote-zip-'));
+    const result: any = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .outputDir(tmpDir)
+      .filePrefix('exp')
+      .file('data', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Sheet1', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .run();
+
+    const zipBuffer = fs.readFileSync(result.file);
+    const entries   = readZipBuffer(zipBuffer);
+
+    const [s1] = await readBuffer(entries[0].data, 'Sheet1');
+    expect(s1.rows).toHaveLength(3);
+    expect(s1.rows[0][0]).toBe(1);
+
+    const [s2] = await readBuffer(entries[1].data, 'Sheet1');
+    expect(s2.rows).toHaveLength(2);
+    expect(s2.rows[0][0]).toBe(4);
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('deletes partial zip on error', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ote-zip-'));
+    const result: any = await OracleSqlToExcel()
+      .connectionFactory(() => Promise.reject(new Error('DB fail')))
+      .outputDir(tmpDir)
+      .filePrefix('bad')
+      .file('rep', (f) => f.sheet('Data', (s) => s.sql('SELECT 1').columns(COLS)))
+      .asZip()
+      .run();
+
+    expect(result.success).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'bad.zip'))).toBe(false);
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('.run() without .asZip() still produces multiple .xlsx files (backward compat)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ote-zip-'));
+    const result: any = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .outputDir(tmpDir)
+      .file('data', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Sheet1', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .run();
+
+    expect(result.success).toBe(true);
+    expect(result.files).toHaveLength(2); // MultiRunResult, not ZipRunResult
+    expect(result.files[0].file).toMatch(/\.xlsx$/);
+
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+});
