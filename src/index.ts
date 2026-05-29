@@ -1403,8 +1403,11 @@ class OracleSqlToExcelBuilder {
     const archive = archiver('zip', { zlib: { level: this._compress ? this._compressLevel : 0 } });
     archive.pipe(outputStream);
 
-    let archiveError: Error | null = null;
-    archive.on('error', (err: Error) => { archiveError = err; });
+    let archiveError  : Error | null = null;
+    let outputAborted                = false;
+    archive.on('error',      (err: Error) => { archiveError = err; });
+    outputStream.on('close', ()           => { outputAborted = true; });
+    outputStream.on('error', ()           => { outputAborted = true; });
 
     try {
       if (!this._connectionFactory) {
@@ -1458,7 +1461,8 @@ class OracleSqlToExcelBuilder {
           let fileIndex = 0;
 
           while ([...states.values()].some((st) => !st.done)) {
-            if (archiveError) throw archiveError;
+            if (archiveError)  throw archiveError;
+            if (outputAborted) throw new Error('Client disconnected — output stream closed mid-export');
 
             const entryName = `${fileCfg._name}_${fileIndex + 1}.xlsx`;
             dbg(`ZIP: append entry "${entryName}"`);
@@ -1791,17 +1795,21 @@ class OracleSqlToExcelBuilder {
       );
     }
     if (this._files.length > 0 && this._asZip) {
+      let streamAborted = false;
+      writableStream.on('close', () => { streamAborted = true; });
+      writableStream.on('error', () => { streamAborted = true; });
+
       const rssThreshold = this._backpressureThreshold;
-      const drainFn: (() => Promise<void>) | null = rssThreshold > 0
-        ? async () => {
-            if (process.memoryUsage().rss <= rssThreshold) return;
-            const started = Date.now();
-            while (process.memoryUsage().rss > rssThreshold) {
-              if (Date.now() - started > 10_000) break;
-              await new Promise<void>((r) => setTimeout(r, 200));
-            }
-          }
-        : null;
+      const drainFn = async (): Promise<void> => {
+        if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
+        if (rssThreshold <= 0 || process.memoryUsage().rss <= rssThreshold) return;
+        const started = Date.now();
+        while (process.memoryUsage().rss > rssThreshold && !streamAborted) {
+          if (Date.now() - started > 10_000) break;
+          await new Promise<void>((r) => setTimeout(r, 200));
+        }
+        if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
+      };
       return this._executeAsZip(writableStream, drainFn);
     }
     return this._execute({ stream: writableStream });
