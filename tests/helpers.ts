@@ -100,7 +100,8 @@ export async function readRawWorksheet(
   sheetName: string
 ): Promise<Array<Array<unknown>>> {
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(buffer as unknown as Buffer);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await wb.xlsx.load(buffer as any);
   const ws = wb.getWorksheet(sheetName);
   if (!ws) return [];
   const rows: Array<Array<unknown>> = [];

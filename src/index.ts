@@ -1084,14 +1084,15 @@ class OracleSqlToExcelBuilder {
    * @private
    */
   async _executeSheetSegment(
-    connection  : OracleConnection,
-    workbook    : StreamWorkbook,
-    sheetCfg    : SheetConfig,
-    progressCtx : ProgressCtx,
-    drainFn     : (() => Promise<void>) | null,
-    maxRows     : number,
-    pendingRows : Record<string, unknown>[],
-    existingRS  : OracleResultSet | null
+    connection      : OracleConnection,
+    workbook        : StreamWorkbook,
+    sheetCfg        : SheetConfig,
+    progressCtx     : ProgressCtx,
+    drainFn         : (() => Promise<void>) | null,
+    maxRows         : number,
+    pendingRows     : Record<string, unknown>[],
+    existingRS      : OracleResultSet | null,
+    globalRowOffset : number = 0
   ): Promise<SheetSegmentResult> {
     const sheetNames                          : string[]        = [];
     let   sheetIndex                                            = 0;
@@ -1126,8 +1127,8 @@ class OracleSqlToExcelBuilder {
       }
       if (sheetCfg._resolvedTotalRows != null) {
         const fmt      = (n: number): string => n.toLocaleString('en-US');
-        const start    = sheetIndex * sheetCfg._maxRowsPerSheet + 1;
-        const end      = Math.min((sheetIndex + 1) * sheetCfg._maxRowsPerSheet, sheetCfg._resolvedTotalRows);
+        const start    = globalRowOffset + sheetIndex * sheetCfg._maxRowsPerSheet + 1;
+        const end      = Math.min(globalRowOffset + (sheetIndex + 1) * sheetCfg._maxRowsPerSheet, sheetCfg._resolvedTotalRows);
         const rangeRow = worksheet.addRow([`Showing rows ${fmt(start)} – ${fmt(end)} of ${fmt(sheetCfg._resolvedTotalRows)} total`]);
         rangeRow.font  = { italic: true, color: { argb: 'FF404040' } };
         if (colCount > 1) worksheet.mergeCells(rangeRow.number, 1, rangeRow.number, colCount);
@@ -1319,7 +1320,8 @@ class OracleSqlToExcelBuilder {
 
           const seg = await this._executeSheetSegment(
             connection, workbook, sheetCfg, progressCtx, drainFn,
-            maxRows, st.pending, st.openRS
+            maxRows, st.pending, st.openRS,
+            st.globalStart - 1
           );
 
           st.globalEnd = st.globalStart + seg.rowsWritten - 1;
