@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.0] - 2026-05-29
+
+### Added
+
+- **`.asZip()`** — new builder method that enables ZIP output mode for `.file()` exports.
+  When set, all three terminal methods deliver a single ZIP archive instead of individual `.xlsx` files:
+  - `.pipe(res)` — streams the ZIP directly to any Writable (e.g. Express response). Set `Content-Type: application/zip` and `Content-Disposition: attachment; filename="export.zip"` before piping.
+  - `.run()` — writes a single `<filePrefix>.zip` file to `outputDir` and returns `ZipRunResult`.
+  - `.toBuffer()` — returns the entire ZIP as a `Buffer`. **Not recommended for large data** — holds full ZIP in RAM.
+  
+  Has no effect when `.file()` is not used (plain `.sheet()` exports are unaffected).
+
+- **`ZipRunResult`** interface exported for TypeScript callers. Contains `file: string` (absolute path to the `.zip`), `success`, `sheets`, `skippedRows`.
+
+### Fixed
+
+- **`showTotalRows` incorrect row range on files 2+ in multi-file exports.** The row range text (e.g. "Showing rows X – Y of Z total") displayed wrong values starting from file 2 because `sheetIndex` reset to `0` for each new file without accounting for previously written rows. Now correctly tracks the global row offset across files.
+
+  *Example fix:* File `Monitoring_1000001-1500000.xlsx` previously showed "Showing rows 1 – 1,000,000 of 2,700,501 total". Now correctly shows "Showing rows 1,000,001 – 1,500,000 of 2,700,501 total".
+
+- **`.pipe()` + `.file()` error message** now explicitly mentions `.asZip()` and the required HTTP headers, making the fix self-evident.
+
+- **`.toBuffer()` + `.file()` error message** updated to mention `.asZip()`.
+
+### Changed
+
+- **`backpressureThreshold` default reduced from 512 MB to 256 MB.** The RSS polling mechanism that pauses Oracle fetching when memory pressure is high now fires earlier, reducing peak RSS during large exports. Users who set `.backpressureThreshold(n)` manually are unaffected.
+
+### Breaking Changes
+
+1. **`backpressureThreshold` default changed.** Exports that previously relied on the 512 MB default will now pause more aggressively at 256 MB. Tune with `.backpressureThreshold(512 * 1024 * 1024)` to restore the old behaviour.
+
+2. **`showTotalRows` display text corrected.** If your code asserts on the exact text of doc-header rows in XLSX output from multi-file exports, update your assertions to reflect the correct row ranges.
+
+3. **`.run()` return type is now `RunResult | MultiRunResult | ZipRunResult`** (previously `RunResult | MultiRunResult`). TypeScript callers that narrowed the return type may need adjustment.
+
+---
+
 ## [1.3.0] - 2026-05-29
 
 ### Added
