@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.1] - 2026-05-29
+
+### Fixed
+
+- **`.compress()` JSDoc** — second parameter `level` (zlib `0`–`9`, default `1`) was undocumented. Now documented with examples.
+- **`.compress(bool, level?)` signature** — added `level` parameter to control zlib compression level for both XLSX content and the outer ZIP archive (when `.asZip()` is used). Previously `compress(true)` used ExcelJS default level; now explicitly defaults to `1` (fastest with compression). `compress(false)` remains unaffected (always `level: 0`, store mode).
+- **`backpressureThreshold` JSDoc** — documented default was `536870912` (512 MB) but actual default since v2.0.0 is `268435456` (256 MB). Corrected in JSDoc and README.
+
+---
+
 ## [2.0.0] - 2026-05-29
 
 ### Added

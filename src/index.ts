@@ -663,6 +663,7 @@ class OracleSqlToExcelBuilder {
   /** @private */ _outputDir              : string;
   /** @private */ _filePrefix             : string;
   /** @private */ _compress               : boolean;
+  /** @private */ _compressLevel         : number;
   /** @private */ _debug                  : boolean;
   /** @private */ _onProgressCb           : ((info: ProgressInfo) => void) | null;
   /** @private */ _sheets                 : SheetConfig[];
@@ -676,6 +677,7 @@ class OracleSqlToExcelBuilder {
     this._outputDir             = process.cwd();
     this._filePrefix            = 'export';
     this._compress              = false;
+    this._compressLevel         = 1;
     this._debug                 = false;
     this._onProgressCb          = null;
     this._sheets                = [];
@@ -720,20 +722,41 @@ class OracleSqlToExcelBuilder {
   filePrefix(value: string): this { this._filePrefix = value; return this; }
 
   /**
-   * Enable or disable ZIP compression inside the XLSX file.
+   * Enable or disable compression inside the XLSX file and the outer ZIP archive (when `.asZip()` is used).
    *
    * Default is `false` (no compression) because:
    * - Compression is CPU-intensive and blocks the stream flush, causing slow download speed.
    * - For HTTP streaming, the response itself can be gzip-compressed by the web server.
    * - For `.run()` (file on disk), enable compression to reduce file size at the cost of speed.
    *
-   * @param value - OPTIONAL. Default when called without argument: `true`.
+   * @param value - Enable compression. Default when called without argument: `true`.
+   * @param level - zlib compression level. Must be an integer between `0` and `9` (inclusive).
+   *   Default: `1`. Only used when `value` is `true`. Applied to both the XML content inside
+   *   each XLSX file and the outer ZIP archive produced by `.asZip()`.
+   *
+   *   | Level | Meaning |
+   *   |-------|---------|
+   *   | `0`   | No compression — store only (same as calling `compress(false)`) |
+   *   | `1`   | Fastest compression — least size reduction, lowest CPU cost |
+   *   | `6`   | Balanced — good size reduction at moderate CPU cost (zlib default) |
+   *   | `9`   | Maximum compression — best size reduction, highest CPU cost |
+   *
+   *   Throws a `RangeError` if `level` is not an integer in `0`–`9`.
    *
    * @example
-   * .compress(false)  // fastest — recommended for .pipe(res) over HTTP
-   * .compress(true)   // smaller file — recommended for .run() to disk
+   * .compress(false)     // no compression — fastest, recommended for .pipe(res) over HTTP
+   * .compress(true)      // compression level 1 — recommended for .run() to disk
+   * .compress(true, 6)   // balanced size/speed
+   * .compress(true, 9)   // maximum compression
    */
-  compress(value = true): this { this._compress = value; return this; }
+  compress(value = true, level = 1): this {
+    if (!Number.isInteger(level) || level < 0 || level > 9) {
+      throw new RangeError(`compress() level must be an integer between 0 and 9, got: ${level}`);
+    }
+    this._compress      = value;
+    this._compressLevel = level;
+    return this;
+  }
 
   /**
    * Maximum process RSS (Resident Set Size) allowed during `.pipe()` streaming before the
@@ -746,7 +769,7 @@ class OracleSqlToExcelBuilder {
    * is downloading slowly and data is accumulating in the Node.js output buffer.
    *
    * Has no effect for `.run()` (file) or `.toBuffer()`.
-   * @param bytes - Default: `536870912` (512 MB).
+   * @param bytes - Default: `268435456` (256 MB).
    *
    * @example
    * .backpressureThreshold(256 * 1024 * 1024)  // pause when RSS exceeds 256 MB
@@ -1308,7 +1331,7 @@ class OracleSqlToExcelBuilder {
           filename        : tempFile,
           useStyles       : true,
           useSharedStrings: false,
-          zip             : this._compress ? undefined : { zlib: { level: 0 } },
+          zip             : { zlib: { level: this._compress ? this._compressLevel : 0 } },
         } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
 
         let fileFirstSheetStart = 0;
@@ -1377,7 +1400,7 @@ class OracleSqlToExcelBuilder {
     const isDevEnv = !['production', 'prod'].includes((process.env.NODE_ENV ?? '').toLowerCase());
     const dbg      = (msg: string): void => { if (this._debug && isDevEnv) console.log(`[OracleSqlToExcel:DEBUG] ${msg}`); };
 
-    const archive = archiver('zip', { zlib: { level: 0 } });
+    const archive = archiver('zip', { zlib: { level: this._compress ? this._compressLevel : 0 } });
     archive.pipe(outputStream);
 
     let archiveError: Error | null = null;
@@ -1447,7 +1470,7 @@ class OracleSqlToExcelBuilder {
               stream          : pass,
               useStyles       : true,
               useSharedStrings: false,
-              zip             : { zlib: { level: 0 } },
+              zip             : { zlib: { level: this._compress ? this._compressLevel : 0 } },
             } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
 
             for (const sheetCfg of fileCfg._sheets) {
@@ -1663,8 +1686,7 @@ class OracleSqlToExcelBuilder {
         ...workbookTarget,
         useStyles       : true,
         useSharedStrings: false,
-        // compress=false: skip ZIP deflate — dramatically faster streaming, slightly larger file
-        zip             : this._compress ? undefined : { zlib: { level: 0 } },
+        zip             : { zlib: { level: this._compress ? this._compressLevel : 0 } },
       // ExcelJS streaming types omit the `zip` option — cast to silence the error
       } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
 

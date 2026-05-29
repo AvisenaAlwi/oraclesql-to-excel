@@ -59,4 +59,29 @@ describe('OracleSqlToExcelBuilder — validation', () => {
     const builder = OracleSqlToExcel() as any;
     expect(builder._backpressureThreshold).toBe(256 * 1024 * 1024);
   });
+
+  it('compress() default level is 1', () => {
+    const builder = OracleSqlToExcel() as any;
+    builder.compress(true);
+    expect(builder._compressLevel).toBe(1);
+  });
+
+  it('compress(true, n) stores custom level', () => {
+    const builder = OracleSqlToExcel() as any;
+    builder.compress(true, 6);
+    expect(builder._compress).toBe(true);
+    expect(builder._compressLevel).toBe(6);
+  });
+
+  it('compress() throws RangeError for level below 0', () => {
+    expect(() => OracleSqlToExcel().compress(true, -1)).toThrow(RangeError);
+  });
+
+  it('compress() throws RangeError for level above 9', () => {
+    expect(() => OracleSqlToExcel().compress(true, 10)).toThrow(RangeError);
+  });
+
+  it('compress() throws RangeError for non-integer level', () => {
+    expect(() => OracleSqlToExcel().compress(true, 1.5)).toThrow(RangeError);
+  });
 });

@@ -115,10 +115,10 @@ Returns a new `OracleSqlToExcelBuilder`. All methods are chainable.
 | `.executeOptions(obj)` | `{}` | Default Oracle execute options for all sheets. |
 | `.outputDir(path)` | `process.cwd()` | Directory for `.run()` output. |
 | `.filePrefix(name)` | `'export'` | Output filename without extension. Saved as `<name>.xlsx`. |
-| `.compress(bool)` | `false` | Enable XLSX ZIP compression. Slower but smaller file. Recommended for `.run()`, not `.pipe()`. |
+| `.compress(bool, level?)` | `false` / `1` | Enable XLSX ZIP compression (and outer ZIP level when using `.asZip()`). `level` is zlib `0`–`9`, default `1`. Slower but smaller file. Recommended for `.run()`, not `.pipe()`. |
 | `.debug(bool)` | `false` | Verbose logging. Active only when `NODE_ENV` is not `production`. |
 | `.onProgress(cb)` | — | Called after each fetch batch. See [Progress Tracking](#progress-tracking-websocket--sse). |
-| `.backpressureThreshold(bytes)` | `536870912` (512 MB) | Pause Oracle fetch when process RSS exceeds this value during `.pipe()`. See [Backpressure & Memory](#backpressure--memory). |
+| `.backpressureThreshold(bytes)` | `268435456` (256 MB) | Pause Oracle fetch when process RSS exceeds this value during `.pipe()`. See [Backpressure & Memory](#backpressure--memory). |
 | `.sheet(name, fn)` | — | Add a sheet. `name` can be a string or array of strings. |
 | `.file(name, fn)` | — | Add a named output file. Only supported with `.run()`. See [Multi-file Export](#multi-file-export). |
 
@@ -788,17 +788,77 @@ OracleSqlToCsv().sql('SELECT CODE, NAME, BALANCE FROM ACCOUNTS')
 
 ### Backpressure & Memory
 
-**Excel (`.pipe()`):** After each Oracle fetch batch, the library checks process RSS. If it exceeds `.backpressureThreshold()` (default: 512 MB), the Oracle fetch pauses and polls every 200 ms until RSS drops. This handles the common case where Node.js sits behind a reverse proxy (nginx, etc.) that accepts data instantly — `stream.write()` always returns `true`, yet data accumulates in Node.js output buffers.
+**Excel (`.pipe()`):** After each Oracle fetch batch, the library checks process RSS. If it exceeds `.backpressureThreshold()` (default: 256 MB), the Oracle fetch pauses and polls every 200 ms until RSS drops. This handles the common case where Node.js sits behind a reverse proxy (nginx, etc.) that accepts data instantly — `stream.write()` always returns `true`, yet data accumulates in Node.js output buffers.
+
+> `.backpressureThreshold()` has no effect on `.run()` (file writes drain naturally) or `.toBuffer()` (data collected in memory by design).
+
+#### Why the stream appears to freeze during a pause
+
+The pause happens **between** Oracle batches — after ExcelJS finishes writing a batch but before the next `getRows()` call. During the pause:
+
+- No new rows → ExcelJS produces no new XML → no new bytes flow to the browser
+- Data already flushed **before** the pause was already received by the browser — only the production of new data stops
+
+In a browser's Network DevTools you will see the download size counter stall for a few seconds, then resume. This is expected and correct behavior.
+
+#### RSS stays near the threshold — why?
+
+Each batch follows this cycle:
+
+```
+getRows(fetchSize) → ExcelJS writes XML → RSS rises
+                                         ↓
+                              RSS > threshold → pause
+                                         ↓
+                              GC recovers some RAM
+                              (active ZIP entry stays open → not all RAM freed)
+                                         ↓
+                              RSS < threshold → resume → next batch
+```
+
+RSS does not drop all the way back to baseline because the active ExcelJS workbook and open archiver ZIP entry hold live buffers. GC only reclaims the overhead from the previous batch. The result is that RSS oscillates just below and above the threshold for the entire export — this is normal.
+
+#### Estimating RSS per batch
+
+Each batch costs roughly:
+
+```
+RSS_per_batch ≈ fetchSize × avg_bytes_per_row × 3
+```
+
+The `× 3` factor accounts for ExcelJS XML expansion (raw data → XML tags) plus archiver ZIP buffering. This is a rough estimate — actual values vary by column count, data types, and string length.
+
+| Row width | `fetchSize 50 000` | `fetchSize 10 000` |
+|-----------|-------------------|-------------------|
+| Narrow — ~100 B/row (few short columns) | ~15 MB | ~3 MB |
+| Average — ~300 B/row (10–15 mixed columns) | ~45 MB | ~9 MB |
+| Wide — ~1 KB/row (many columns or long strings) | ~150 MB | ~30 MB |
+
+**Rule of thumb for setting `backpressureThreshold`:**
+
+```
+threshold = baseline_RSS + (2 × RSS_per_batch)
+```
+
+- `baseline_RSS` — process RSS before any export starts (check with `process.memoryUsage().rss`)
+- Leaving headroom of `2 × RSS_per_batch` ensures one full batch can be processed before the pause triggers
+
+#### Tuning example — 2.7 M rows, average row width
 
 ```js
-// Pause when RSS exceeds 256 MB — tighter limit for memory-constrained deployments
+// Baseline RSS ~80 MB, average row ~300 B, fetchSize 10 000 → ~9 MB/batch
+// threshold = 80 + (2 × 9) ≈ 100 MB
 OracleSqlToExcel()
-  .backpressureThreshold(256 * 1024 * 1024)
-  .sheet('Data', s => s.sql(SQL).columns(COLS))
+  .fetchSize(10_000)                          // smaller batches → smaller RSS spike
+  .backpressureThreshold(100 * 1024 * 1024)  // pause earlier → GC more effective
+  .file('report', f => f
+    .sheet('Data', s => s.sql(SQL).columns(COLS))
+  )
+  .asZip()
   .pipe(res);
 ```
 
-> `.backpressureThreshold()` has no effect on `.run()` (file writes drain naturally) or `.toBuffer()` (data collected in memory by design).
+Smaller `fetchSize` is the most effective lever: it directly reduces RSS spike per batch and makes pauses shorter and less visible to the end user.
 
 **CSV (`.pipe()`):** CSV rows are plain text — far smaller than Excel's XML+ZIP output. At 50,000 rows/batch, a typical batch is a few MB of text and flushes quickly through the TCP stack. Backpressure is generally not a concern for CSV streams.
 
