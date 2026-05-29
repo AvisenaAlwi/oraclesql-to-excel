@@ -2,6 +2,7 @@ import fs from 'fs';
 import ExcelJS from 'exceljs';
 import path from 'path';
 import { PassThrough, Writable } from 'stream';
+import archiver from 'archiver';
 
 // oracledb.OUT_FORMAT_OBJECT (numeric value 4002, stable across v5+)
 const OUT_FORMAT_OBJECT    = 4002;
@@ -134,6 +135,11 @@ export interface MultiRunResult extends Result {
 export interface BufferResult extends Result {
   /** In-memory workbook buffer. Empty `Buffer` when `success` is `false`. */
   buffer: Buffer;
+}
+
+export interface ZipRunResult extends Result {
+  /** Absolute path to the written .zip file. */
+  file: string;
 }
 
 // ── Internal types ────────────────────────────────────────────────────────────
@@ -662,6 +668,7 @@ class OracleSqlToExcelBuilder {
   /** @private */ _sheets                 : SheetConfig[];
   /** @private */ _files                  : FileConfig[];
   /** @private */ _backpressureThreshold  : number;
+  /** @private */ _asZip                  : boolean;
 
   constructor() {
     this._connectionFactory     = null;
@@ -674,6 +681,7 @@ class OracleSqlToExcelBuilder {
     this._sheets                = [];
     this._files                 = [];
     this._backpressureThreshold = 512 * 1024 * 1024; // 512 MB
+    this._asZip                 = false;
   }
 
   // ── Workbook-level methods ─────────────────────────────────────────────────
@@ -744,6 +752,21 @@ class OracleSqlToExcelBuilder {
    * .backpressureThreshold(256 * 1024 * 1024)  // pause when RSS exceeds 256 MB
    */
   backpressureThreshold(bytes: number): this { this._backpressureThreshold = bytes; return this; }
+
+  /**
+   * Enable ZIP output mode for `.file()` exports.
+   * Required when calling `.pipe()` or `.toBuffer()` with `.file()`.
+   * Optional for `.run()` — without it, `.run()` retains existing behavior (multiple `.xlsx` files).
+   *
+   * When set, all terminal methods deliver a single ZIP archive:
+   *   `.pipe(res)`    → streams ZIP to writable
+   *   `.run()`        → writes `<filePrefix>.zip` to `outputDir`
+   *   `.toBuffer()`   → returns ZIP as Buffer (avoid for large data)
+   *
+   * Has no effect when `.file()` is not used.
+   * @param value - Default `true` when called without argument.
+   */
+  asZip(value = true): this { this._asZip = value; return this; }
 
   /**
    * Add a logical file to the export. Each `.file()` call defines one output `.xlsx` file

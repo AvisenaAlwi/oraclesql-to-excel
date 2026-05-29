@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import AdmZip from 'adm-zip';
 
 export interface MockMeta {
   name: string;
@@ -75,4 +76,34 @@ export async function readBuffer(
   }
 
   return results;
+}
+
+/**
+ * Extract all entries from a ZIP buffer. Returns name + raw data per entry.
+ */
+export function readZipBuffer(
+  zipBuffer: Buffer
+): Array<{ name: string; data: Buffer }> {
+  const zip = new AdmZip(zipBuffer);
+  return zip.getEntries().map((e) => ({
+    name: e.entryName,
+    data: e.getData(),
+  }));
+}
+
+/**
+ * Read ALL rows (including pre-header rows like docHeader / showTotalRows) from a
+ * named worksheet in an XLSX buffer. Returns 1-indexed ExcelJS cell value arrays.
+ */
+export async function readRawWorksheet(
+  buffer : Buffer,
+  sheetName: string
+): Promise<Array<Array<unknown>>> {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer as unknown as Buffer);
+  const ws = wb.getWorksheet(sheetName);
+  if (!ws) return [];
+  const rows: Array<Array<unknown>> = [];
+  ws.eachRow((row) => { rows.push(row.values as Array<unknown>); });
+  return rows;
 }
