@@ -96,7 +96,7 @@ export function readZipBuffer(
  * named worksheet in an XLSX buffer. Returns 1-indexed ExcelJS cell value arrays.
  */
 export async function readRawWorksheet(
-  buffer : Buffer,
+  buffer: Buffer,
   sheetName: string
 ): Promise<Array<Array<unknown>>> {
   const wb = new ExcelJS.Workbook();
