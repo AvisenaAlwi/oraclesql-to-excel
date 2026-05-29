@@ -1487,6 +1487,7 @@ class OracleSqlToExcelBuilder {
       });
       archive.finalize();
       await finalizePromise;
+      if (archiveError) throw archiveError;
       dbg('ZIP: archive done');
 
       return { success: true, sheets: allSheets, skippedRows: totalSkipped };
