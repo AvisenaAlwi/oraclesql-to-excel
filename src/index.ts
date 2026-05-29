@@ -1735,8 +1735,26 @@ class OracleSqlToExcelBuilder {
    * await OracleSqlToExcel().sheet('Data', s => s.sql(SQL).columns(COLS)).pipe(res);
    */
   async pipe(writableStream: Writable): Promise<Result> {
-    if (this._files.length > 0) {
-      throw new Error('.pipe() does not support .file() — multi-file output requires .run().');
+    if (this._files.length > 0 && !this._asZip) {
+      throw new Error(
+        '.pipe() with .file() requires .asZip().\n' +
+        'Call .asZip() on the builder so all files are streamed as a single ZIP.\n' +
+        'Remember to set Content-Type: application/zip and Content-Disposition: attachment; filename="export.zip" before piping.'
+      );
+    }
+    if (this._files.length > 0 && this._asZip) {
+      const rssThreshold = this._backpressureThreshold;
+      const drainFn: (() => Promise<void>) | null = rssThreshold > 0
+        ? async () => {
+            if (process.memoryUsage().rss <= rssThreshold) return;
+            const started = Date.now();
+            while (process.memoryUsage().rss > rssThreshold) {
+              if (Date.now() - started > 30_000) break;
+              await new Promise<void>((r) => setTimeout(r, 200));
+            }
+          }
+        : null;
+      return this._executeAsZip(writableStream, drainFn);
     }
     return this._execute({ stream: writableStream });
   }

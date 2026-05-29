@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { PassThrough } from 'stream';
 import ExcelJS from 'exceljs';
 import { OracleSqlToExcel } from '../src/index';
 import { createStreamConn, createCountConn, readZipBuffer, readBuffer, readRawWorksheet } from './helpers';
@@ -170,5 +171,59 @@ describe('toBuffer() + asZip()', () => {
     const entries = readZipBuffer(buffer);
     expect(entries).toHaveLength(1);
     expect(entries[0].name).toBe('single_1.xlsx');
+  });
+});
+
+// ── pipe + asZip ──────────────────────────────────────────────────────────────
+
+describe('pipe() + asZip()', () => {
+  const rows    = makeRows(5);
+  const factory = () => Promise.resolve(createStreamConn(rows, COLS.map((c) => ({ name: c.key }))));
+
+  it('streams a valid ZIP to a PassThrough', async () => {
+    const chunks : Buffer[] = [];
+    const pass              = new PassThrough();
+    pass.on('data', (c: Buffer) => chunks.push(c));
+    const done = new Promise<void>((res, rej) => { pass.on('finish', res); pass.on('error', rej); });
+
+    const result = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('rep', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .pipe(pass);
+
+    await done;
+    expect(result.success).toBe(true);
+
+    const zipBuffer = Buffer.concat(chunks);
+    const entries   = readZipBuffer(zipBuffer);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].name).toBe('rep_1.xlsx');
+    expect(entries[1].name).toBe('rep_2.xlsx');
+  });
+
+  it('throws when .file() used without .asZip()', async () => {
+    const pass = new PassThrough();
+    await expect(
+      OracleSqlToExcel()
+        .connectionFactory(factory)
+        .file('rep', (f) => f.sheet('Data', (s) => s.sql('SELECT 1').columns(COLS)))
+        .pipe(pass)
+    ).rejects.toThrow(/asZip/i);
+  });
+
+  it('error message mentions Content-Type hint', async () => {
+    const pass = new PassThrough();
+    try {
+      await OracleSqlToExcel()
+        .connectionFactory(factory)
+        .file('rep', (f) => f.sheet('Data', (s) => s.sql('SELECT 1').columns(COLS)))
+        .pipe(pass);
+    } catch (e) {
+      expect(String(e)).toMatch(/Content-Type/i);
+    }
   });
 });
