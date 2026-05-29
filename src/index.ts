@@ -1362,6 +1362,145 @@ class OracleSqlToExcelBuilder {
   }
 
   /**
+   * Core execution for .asZip() mode. Streams each FileConfig's XLSX output
+   * sequentially into named ZIP entries via archiver.
+   * @private
+   */
+  async _executeAsZip(
+    outputStream : Writable,
+    drainFn      : (() => Promise<void>) | null
+  ): Promise<Result> {
+    const allSheets   : string[]    = [];
+    const progressCtx : ProgressCtx = { totalRowsWritten: 0 };
+    let   totalSkipped               = 0;
+
+    const isDevEnv = !['production', 'prod'].includes((process.env.NODE_ENV ?? '').toLowerCase());
+    const dbg      = (msg: string): void => { if (this._debug && isDevEnv) console.log(`[OracleSqlToExcel:DEBUG] ${msg}`); };
+
+    const archive = archiver('zip', { zlib: { level: 0 } });
+    archive.pipe(outputStream);
+
+    let archiveError: Error | null = null;
+    archive.on('error', (err: Error) => { archiveError = err; });
+
+    try {
+      if (!this._connectionFactory) {
+        throw new Error('No connection factory set. Call .connectionFactory(() => pool.getConnection()) before running the export.');
+      }
+
+      for (const fileCfg of this._files) {
+        let connection: OracleConnection | null = null;
+
+        try {
+          connection = await this._connectionFactory();
+
+          // COUNT queries for showTotalRows — parallel, each on its own connection
+          await Promise.all(fileCfg._sheets.map(async (sheetCfg) => {
+            const label = Array.isArray(sheetCfg._name) ? sheetCfg._name[0] : sheetCfg._name;
+            if (!sheetCfg._showTotalRows) return;
+            try {
+              const trimmed = sheetCfg._sql.trim().replace(/;+$/, '');
+              if (/^\s*WITH\s+/i.test(trimmed)) return;
+              const countConn = await this._connectionFactory!();
+              try {
+                const result = await countConn.execute(
+                  `SELECT COUNT(*) AS TOTAL FROM (${trimmed})`,
+                  sheetCfg._param,
+                  { outFormat: OUT_FORMAT_OBJECT }
+                );
+                sheetCfg._resolvedTotalRows = (result.rows?.[0]?.['TOTAL'] as number | undefined) ?? null;
+              } finally {
+                await countConn.close().catch(() => {});
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error(`[OracleSqlToExcel:ERROR] COUNT query failed for sheet "${label}": ${msg}`);
+            }
+          }));
+
+          const maxRows = fileCfg._maxRowsPerFile > 0 ? fileCfg._maxRowsPerFile : Number.MAX_SAFE_INTEGER;
+
+          interface SheetState {
+            openRS     : OracleResultSet | null;
+            pending    : Record<string, unknown>[];
+            done       : boolean;
+            globalStart: number;
+            globalEnd  : number;
+          }
+
+          const states = new Map<SheetConfig, SheetState>(
+            fileCfg._sheets.map((s) => [s, { openRS: null, pending: [], done: false, globalStart: 1, globalEnd: 0 }])
+          );
+
+          let fileIndex = 0;
+
+          while ([...states.values()].some((st) => !st.done)) {
+            if (archiveError) throw archiveError;
+
+            const entryName = `${fileCfg._name}_${fileIndex + 1}.xlsx`;
+            dbg(`ZIP: append entry "${entryName}"`);
+
+            const pass = new PassThrough();
+            archive.append(pass, { name: entryName });
+
+            const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+              stream          : pass,
+              useStyles       : true,
+              useSharedStrings: false,
+              zip             : { zlib: { level: 0 } },
+            } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
+
+            for (const sheetCfg of fileCfg._sheets) {
+              const st = states.get(sheetCfg)!;
+              if (st.done) continue;
+
+              const seg = await this._executeSheetSegment(
+                connection, workbook, sheetCfg, progressCtx, drainFn,
+                maxRows, st.pending, st.openRS,
+                st.globalStart - 1
+              );
+
+              st.globalEnd   = st.globalStart + seg.rowsWritten - 1;
+              allSheets.push(...seg.sheetNames);
+              totalSkipped  += seg.skippedRows;
+              st.globalStart = st.globalEnd + 1;
+              st.openRS      = seg.openRS;
+              st.pending     = seg.overflowRows;
+              st.done        = seg.openRS === null && seg.overflowRows.length === 0;
+            }
+
+            await workbook.commit(); // ends pass → archiver closes this ZIP entry
+            dbg(`ZIP: entry "${entryName}" committed`);
+            fileIndex++;
+          }
+        } finally {
+          if (connection) await connection.close().catch(() => {});
+        }
+      }
+
+      if (archiveError) throw archiveError;
+
+      dbg('ZIP: archive.finalize()');
+      const finalizePromise = new Promise<void>((resolve, reject) => {
+        archive.on('finish', resolve);
+        archive.on('error', reject);
+      });
+      archive.finalize();
+      await finalizePromise;
+      dbg('ZIP: archive done');
+
+      return { success: true, sheets: allSheets, skippedRows: totalSkipped };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[OracleSqlToExcel:ERROR] _executeAsZip FAILED — ${msg}`);
+      if (!outputStream.writableEnded) {
+        try { outputStream.end(); } catch (_) {}
+      }
+      return { success: false, error: msg, sheets: allSheets, skippedRows: totalSkipped };
+    }
+  }
+
+  /**
    * Core execution logic shared by `.run()`, `.pipe()`, and `.toBuffer()`.
    * @private
    */
@@ -1612,7 +1751,24 @@ class OracleSqlToExcelBuilder {
    */
   async toBuffer(): Promise<BufferResult> {
     if (this._files.length > 0) {
-      throw new Error('.toBuffer() does not support .file() — multi-file output requires .run().');
+      if (!this._asZip) {
+        throw new Error(
+          '.toBuffer() with .file() requires .asZip().\n' +
+          'Call .asZip() on the builder so all files are returned as a single ZIP Buffer.\n' +
+          'For large data, prefer .run() or .pipe() to avoid loading the entire ZIP in memory.'
+        );
+      }
+      const zipChunks: Buffer[] = [];
+      const zipPass             = new PassThrough();
+      zipPass.on('data', (chunk: Buffer) => zipChunks.push(chunk));
+      const zipDone = new Promise<void>((resolve, reject) => {
+        zipPass.on('finish', resolve);
+        zipPass.on('error', reject);
+      });
+      const result = await this._executeAsZip(zipPass, null);
+      if (!zipPass.writableEnded) zipPass.end();
+      await zipDone.catch(() => {});
+      return { ...result, buffer: result.success ? Buffer.concat(zipChunks) : Buffer.alloc(0) };
     }
     const chunks: Buffer[] = [];
     const pass             = new PassThrough();

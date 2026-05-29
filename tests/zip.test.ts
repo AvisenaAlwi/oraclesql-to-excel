@@ -66,3 +66,109 @@ describe('showTotalRows — globalRowOffset fix (multi-file)', () => {
     fs.rmSync(tmpDir, { recursive: true });
   });
 });
+
+// ── toBuffer + asZip ──────────────────────────────────────────────────────────
+
+describe('toBuffer() + asZip()', () => {
+  const rows = makeRows(5);
+  const factory = () => Promise.resolve(createStreamConn(rows, COLS.map((c) => ({ name: c.key }))));
+
+  it('returns success=true and non-empty buffer', async () => {
+    const { success, buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('report', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .toBuffer();
+
+    expect(success).toBe(true);
+    expect(buffer.length).toBeGreaterThan(0);
+  });
+
+  it('ZIP buffer contains correct number of entries', async () => {
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('report', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .toBuffer();
+
+    const entries = readZipBuffer(buffer);
+    // 5 rows, maxRowsPerFile=3 → 2 entries
+    expect(entries).toHaveLength(2);
+  });
+
+  it('ZIP entry names are sequential', async () => {
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('myreport', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .toBuffer();
+
+    const entries = readZipBuffer(buffer);
+    expect(entries[0].name).toBe('myreport_1.xlsx');
+    expect(entries[1].name).toBe('myreport_2.xlsx');
+  });
+
+  it('each XLSX entry contains correct row data', async () => {
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('rep', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .toBuffer();
+
+    const entries = readZipBuffer(buffer);
+
+    const [sheet1] = await readBuffer(entries[0].data, 'Data');
+    expect(sheet1.rows).toHaveLength(3); // rows 1-3
+
+    const [sheet2] = await readBuffer(entries[1].data, 'Data');
+    expect(sheet2.rows).toHaveLength(2); // rows 4-5
+  });
+
+  it('returns success=false when connectionFactory fails', async () => {
+    const { success, buffer, error } = await OracleSqlToExcel()
+      .connectionFactory(() => Promise.reject(new Error('DB down')))
+      .file('rep', (f) => f.sheet('Data', (s) => s.sql('SELECT 1').columns(COLS)))
+      .asZip()
+      .toBuffer();
+
+    expect(success).toBe(false);
+    expect(buffer.length).toBe(0);
+    expect(error).toMatch(/DB down/i);
+  });
+
+  it('throws when .file() used without .asZip()', async () => {
+    await expect(
+      OracleSqlToExcel()
+        .connectionFactory(factory)
+        .file('rep', (f) => f.sheet('Data', (s) => s.sql('SELECT 1').columns(COLS)))
+        .toBuffer()
+    ).rejects.toThrow(/asZip/i);
+  });
+
+  it('single file (data fits in maxRowsPerFile) produces 1 ZIP entry', async () => {
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('single', (f) => f
+        .maxRowsPerFile(100)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .toBuffer();
+
+    const entries = readZipBuffer(buffer);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe('single_1.xlsx');
+  });
+});
