@@ -1,7 +1,9 @@
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { OracleSqlToExcel } = require('./dist/index.js');
+const mod = require('./dist/index.js');
 
-export { OracleSqlToExcel };
+export const OracleSqlToExcel = mod.OracleSqlToExcel;
+export const OracleSqlToCsv   = mod.OracleSqlToCsv;
+
 export default OracleSqlToExcel;

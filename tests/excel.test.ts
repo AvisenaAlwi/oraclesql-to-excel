@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { PassThrough } from 'stream';
-import { OracleSqlToExcel } from '../src/index';
+import { OracleSqlToExcel, RunResult } from '../src/index';
 import { createStreamConn, createCountConn, readBuffer } from './helpers';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ describe('run()', () => {
       .outputDir(tmpDir)
       .filePrefix('output')
       .sheet('S', (s) => s.sql('SELECT * FROM T').columns(COLS))
-      .run();
+      .run() as RunResult;
 
     expect(success).toBe(true);
     expect(file).toMatch(/output\.xlsx$/);
@@ -309,7 +309,7 @@ describe('run()', () => {
       .outputDir(tmpDir)
       .filePrefix('bad')
       .sheet('S', (s) => s.sql('SELECT 1 FROM DUAL').columns(COLS))
-      .run();
+      .run() as RunResult;
 
     expect(success).toBe(false);
     expect(fs.existsSync(file)).toBe(false);

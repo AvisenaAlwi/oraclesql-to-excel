@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-05-29
+
+### Added
+
+- **`OracleSqlToCsv()`** — new builder for streaming Oracle SQL results directly to `.csv`. Uses the same fluent API pattern as `OracleSqlToExcel()`.
+
+  Unlike the Excel path, CSV writes each row directly to the output stream with no intermediate archiver or ZIP buffer. Memory usage is `O(fetchSize × row_size)` at all times regardless of total row count — no backpressure issues, no Ingress/proxy buffering problems, suitable for any data size.
+
+  ```js
+  import { OracleSqlToCsv } from '@avisenaalwi/oraclesql-to-excel';
+
+  // HTTP streaming (no memory issues even for 10M+ rows)
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="report.csv"');
+  await OracleSqlToCsv()
+    .connectionFactory(() => pool.getConnection())
+    .sql('SELECT CODE, NAME, AMOUNT FROM BIG_TABLE')
+    .columns([
+      { key: 'CODE',   header: 'Code'   },
+      { key: 'NAME',   header: 'Name'   },
+      { key: 'AMOUNT', header: 'Amount' },
+    ])
+    .pipe(res);
+
+  // Write to file
+  const { file, rowsWritten } = await OracleSqlToCsv()
+    .connectionFactory(() => pool.getConnection())
+    .sql('SELECT * FROM BIG_TABLE')
+    .run('/tmp/export.csv');
+  ```
+
+  **Methods:** `.connectionFactory()`, `.sql()`, `.columns()`, `.fetchSize()`, `.separator()`, `.withBom()`, `.onProgress()`.  
+  **Terminal:** `.run(filepath)` → `CsvRunResult` · `.pipe(stream)` → `CsvResult` · `.toBuffer()` → `CsvBufferResult`.
+
+- **`CsvResult`**, **`CsvRunResult`**, **`CsvBufferResult`** types exported for TypeScript callers.
+
+---
+
+## [1.2.0] - 2026-05-29
+
+### Added
+
+- **`.file(name, fn)` — multi-file API.** Groups one or more sheets into a named logical file. Each `.file()` call on the builder defines one output `.xlsx` (or a set of split files). This is the primary way to use multi-file exports — it replaces the old builder-level `maxRowsPerFile()` approach.
+
+  ```js
+  OracleSqlToExcel()
+    .connectionFactory(() => pool.getConnection())
+    .outputDir('/tmp')
+    .file('laporan', f => f
+      .maxRowsPerFile(1_000_000)
+      .sheet('Detail',  s => s.sql(SQL1).columns(COLS1).maxRowsPerSheet(900_000))
+      .sheet('Summary', s => s.sql(SQL2).columns(COLS2))
+    )
+    .run()
+  ```
+
+  Only supported with `.run()`. Using `.file()` with `.pipe()` or `.toBuffer()` throws an error.
+
+- **`FileConfig`** — new per-file configuration class, obtained via the `.file()` callback. Methods: `.maxRowsPerFile(n)`, `.sheet(name, fn)` (identical to the builder's `.sheet()`).
+
+- **`FileConfig.maxRowsPerFile(n)`** — when set on a `FileConfig`, splits the file into multiple physical `.xlsx` files whenever data rows exceed `n`. Files are named `<name>_<startRow>-<endRow>.xlsx` for single-sheet configs, or `<name>_1.xlsx`, `<name>_2.xlsx`, … for multi-sheet configs. Oracle's `ResultSet` is kept open across files — only one query and one connection per sheet regardless of how many files are produced. Sheet splitting (`.maxRowsPerSheet()`) applies independently within each file.
+
+- **`MultiRunResult`** — return type of `.run()` when `.file()` is used. Contains a `files` array of `FileSegment` (`{ file, startRow, endRow }`).
+
+- **`FileSegment`** type exported for TypeScript callers.
+
+- **Multiple `.file()` calls** — each call defines an independent output file. All files are written sequentially and results are merged into a single `MultiRunResult`.
+
+### Backward compatibility
+
+- **`.sheet()` at builder level is unchanged.** Existing single-file exports require no migration.
+- **`.pipe()` and `.toBuffer()` are unchanged** when `.file()` is not used.
+
+---
+
 ## [1.1.4] - 2026-05-28
 
 ### Fixed

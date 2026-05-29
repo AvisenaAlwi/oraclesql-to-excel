@@ -1,10 +1,12 @@
 # @avisenaalwi/oraclesql-to-excel
 
-Stream Oracle SQL query results directly into Excel (`.xlsx`) files with a fluent, chainable API.
+Stream Oracle SQL query results directly into Excel (`.xlsx`) or CSV files with a fluent, chainable API. Built for exports with millions of rows — memory stays bounded regardless of result set size.
 
-- **Streaming** — rows piped from Oracle directly into ExcelJS; no full dataset held in memory
+- **Streaming** — rows piped from Oracle directly into the output; no full dataset held in memory
+- **Excel & CSV** — choose `.xlsx` for rich formatting or `.csv` for maximum throughput and compatibility
 - **Multi-sheet** — multiple SQL queries, each on its own sheet, in one workbook
 - **Split sheets** — automatically create new sheets when a row limit is reached
+- **Multi-file** — split one export across multiple `.xlsx` files via `.file()` + `.maxRowsPerFile()`
 - **HTTP streaming** — pipe directly to an Express/Fastify response, no temp file
 - **Buffer output** — return as `Buffer` for S3 uploads, email attachments, or DB BLOBs
 - **Document headers** — custom rows above the table (title, period, logo placeholders) with merge and style support
@@ -32,31 +34,32 @@ npm install oracledb
 
 ```js
 // CommonJS
-const { OracleSqlToExcel } = require('@avisenaalwi/oraclesql-to-excel');
+const { OracleSqlToExcel, OracleSqlToCsv } = require('@avisenaalwi/oraclesql-to-excel');
 ```
 
 ```js
 // ESM
-import { OracleSqlToExcel } from '@avisenaalwi/oraclesql-to-excel';
+import { OracleSqlToExcel, OracleSqlToCsv } from '@avisenaalwi/oraclesql-to-excel';
 ```
 
 ```ts
 // TypeScript — full type inference, no extra @types needed
-import { OracleSqlToExcel } from '@avisenaalwi/oraclesql-to-excel';
-import type { ColumnDef, HeaderStyle, DocHeaderRow, RunResult, BufferResult } from '@avisenaalwi/oraclesql-to-excel';
+import { OracleSqlToExcel, OracleSqlToCsv } from '@avisenaalwi/oraclesql-to-excel';
+import type {
+  ColumnDef, HeaderStyle, DocHeaderRow,
+  RunResult, MultiRunResult, BufferResult,
+  CsvResult, CsvRunResult, CsvBufferResult,
+} from '@avisenaalwi/oraclesql-to-excel';
 ```
 
 ---
 
 ## Quick Start
 
-**JavaScript (CommonJS)**
+### Excel
 
 ```js
-const oracledb       = require('oracledb');
 const { OracleSqlToExcel } = require('@avisenaalwi/oraclesql-to-excel');
-
-const pool = await oracledb.createPool({ /* your pool config */ });
 
 const { success, file } = await OracleSqlToExcel()
   .connectionFactory(() => pool.getConnection())
@@ -77,34 +80,23 @@ const { success, file } = await OracleSqlToExcel()
 console.log(success, file); // true, '/path/to/account-report.xlsx'
 ```
 
-**TypeScript**
+### CSV
 
-```ts
-import oracledb                              from 'oracledb';
-import { OracleSqlToExcel }                        from '@avisenaalwi/oraclesql-to-excel';
-import type { ColumnDef, RunResult }         from '@avisenaalwi/oraclesql-to-excel';
+```js
+const { OracleSqlToCsv } = require('@avisenaalwi/oraclesql-to-excel');
 
-const pool = await oracledb.createPool({ /* your pool config */ });
-
-const COLS: ColumnDef[] = [
-  { key: 'CODE',    header: 'Code',    type: 'text',   width: 12 },
-  { key: 'NAME',    header: 'Name',    type: 'text',   width: 30 },
-  { key: 'BALANCE', header: 'Balance', type: 'number', width: 18, numFmt: '#,##0.00' },
-];
-
-const result: RunResult = await OracleSqlToExcel()
+// Write to file
+const { success, file, rowsWritten } = await OracleSqlToCsv()
   .connectionFactory(() => pool.getConnection())
-  .sheet('Report', s => s
-    .sql('SELECT CODE, NAME, BALANCE FROM ACCOUNTS')
-    .columns(COLS)
-    .freezeHeader()
-    .autoFilter()
-    .headerStyle({ bgColor: '4472C4', fontColor: 'FFFFFF' })
-  )
-  .filePrefix('account-report')
-  .run();
+  .sql('SELECT CODE, NAME, BALANCE FROM ACCOUNTS')
+  .columns([
+    { key: 'CODE',    header: 'Code'    },
+    { key: 'NAME',    header: 'Name'    },
+    { key: 'BALANCE', header: 'Balance' },
+  ])
+  .run('/var/reports/accounts.csv');
 
-console.log(result.success, result.file);
+console.log(success, file, rowsWritten);
 ```
 
 ---
@@ -113,7 +105,7 @@ console.log(result.success, result.file);
 
 ### `OracleSqlToExcel()`
 
-Returns a new `OracleSqlToExcelBuilder` instance. All methods are chainable.
+Returns a new `OracleSqlToExcelBuilder`. All methods are chainable.
 
 #### Workbook-level methods
 
@@ -126,15 +118,16 @@ Returns a new `OracleSqlToExcelBuilder` instance. All methods are chainable.
 | `.compress(bool)` | `false` | Enable XLSX ZIP compression. Slower but smaller file. Recommended for `.run()`, not `.pipe()`. |
 | `.debug(bool)` | `false` | Verbose logging. Active only when `NODE_ENV` is not `production`. |
 | `.onProgress(cb)` | — | Called after each fetch batch. See [Progress Tracking](#progress-tracking-websocket--sse). |
-| `.backpressureThreshold(bytes)` | `16777216` (16 MB) | Pause Oracle fetch when the output stream buffer exceeds this size. Only applies to `.pipe()`. See [Backpressure & Memory](#backpressure--memory-pipe-only). |
+| `.backpressureThreshold(bytes)` | `536870912` (512 MB) | Pause Oracle fetch when process RSS exceeds this value during `.pipe()`. See [Backpressure & Memory](#backpressure--memory). |
 | `.sheet(name, fn)` | — | Add a sheet. `name` can be a string or array of strings. |
+| `.file(name, fn)` | — | Add a named output file. Only supported with `.run()`. See [Multi-file Export](#multi-file-export). |
 
 #### Terminal methods
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `.run()` | `Promise<RunResult>` | Write workbook to disk. Deletes partial file on error. |
-| `.pipe(stream)` | `Promise<Result>` | Stream workbook to any `WritableStream`. |
+| `.run()` | `Promise<RunResult \| MultiRunResult>` | Write workbook to disk. Returns `MultiRunResult` when `.file()` is used. |
+| `.pipe(stream)` | `Promise<Result>` | Stream workbook to any `Writable`. |
 | `.toBuffer()` | `Promise<BufferResult>` | Return workbook as `Buffer`. |
 
 ---
@@ -158,23 +151,64 @@ Received as argument `s` inside the `.sheet(name, fn)` callback.
 
 ---
 
+### `FileConfig` — per-file methods
+
+Received as argument `f` inside the `.file(name, fn)` callback. Only applicable with `.run()`.
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `.maxRowsPerFile(n)` | `0` (no split) | Split into multiple `.xlsx` files when data rows exceed `n`. |
+| `.sheet(name, fn)` | — | Add a sheet to this file. Same API as the builder's `.sheet()`. |
+
+---
+
+### `OracleSqlToCsv()`
+
+Returns a new `OracleSqlToCsvBuilder`. All methods are chainable.
+
+Unlike Excel, CSV writes each row directly to the output stream with no intermediate archiver or ZIP buffer. Memory usage is `O(fetchSize × row_size)` at all times, making it suitable for any dataset size.
+
+#### Methods
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `.connectionFactory(fn)` | — | **Required.** `fn` must return `Promise<Connection>`. |
+| `.sql(query, params, opts)` | — | **Required.** Oracle SQL with optional bind parameters and execute options. |
+| `.columns(defs)` | auto-detect | Array of `{ key, header }`. Omit to auto-detect from Oracle metadata. |
+| `.fetchSize(n)` | `50_000` | Rows fetched per Oracle round-trip. |
+| `.separator(char)` | `','` | Field separator. Use `';'` for European Excel, `'\t'` for TSV. |
+| `.withBom(bool)` | `true` | Prepend UTF-8 BOM so Windows Excel opens the file with correct encoding. |
+| `.onProgress(cb)` | — | Called after each fetch batch with `{ rowsWritten }`. |
+
+#### Terminal methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `.run(filepath)` | `Promise<CsvRunResult>` | Write CSV to file at `filepath` (absolute or relative, including extension). |
+| `.pipe(stream)` | `Promise<CsvResult>` | Stream CSV to any `Writable` (e.g. Express `res`). |
+| `.toBuffer()` | `Promise<CsvBufferResult>` | Return entire CSV as `Buffer`. |
+
+---
+
 ### `ColumnDef`
 
 ```js
 {
   key       : 'COLUMN_NAME',          // Oracle column name — case-sensitive
   header    : 'Display Label',        // Header text. Defaults to key.
-  type      : 'text',                 // 'text' | 'number' | 'date' | 'datetime'
-  width     : 18,                     // Column width in Excel character units
-  numFmt    : '#,##0.00',             // Excel number format string
-  align     : 'right',                // 'left' | 'center' | 'right'
-  wrapText  : false,                  // Enable text wrap
-  bgColor   : 'FFFF00',               // Cell background color (hex, with or without #)
-  fontColor : 'FF0000',               // Cell font color (hex)
+  type      : 'text',                 // 'text' | 'number' | 'date' | 'datetime'  (Excel only)
+  width     : 18,                     // Column width in Excel character units     (Excel only)
+  numFmt    : '#,##0.00',             // Excel number format string                (Excel only)
+  align     : 'right',                // 'left' | 'center' | 'right'              (Excel only)
+  wrapText  : false,                  // Enable text wrap                          (Excel only)
+  bgColor   : 'FFFF00',               // Cell background color (hex)               (Excel only)
+  fontColor : 'FF0000',               // Cell font color (hex)                     (Excel only)
 }
 ```
 
-**Type notes:**
+For CSV, only `key` and `header` are used.
+
+**Type notes (Excel):**
 - `number` — values with > 15 significant digits are cast to string to prevent Excel precision loss.
 - `date` — default format `dd/mm/yyyy`.
 - `datetime` — default format `dd/mm/yyyy hh:mm:ss`.
@@ -182,21 +216,9 @@ Received as argument `s` inside the `.sheet(name, fn)` callback.
 
 ---
 
-### `HeaderStyle`
-
-```js
-{
-  bold      : true,     // Default: true
-  bgColor   : '4472C4', // Background color hex
-  fontColor : 'FFFFFF', // Font color hex
-}
-```
-
----
-
 ### Return Values
 
-#### `.run()` → `RunResult`
+#### `OracleSqlToExcel().run()` → `RunResult`
 
 ```js
 {
@@ -205,6 +227,21 @@ Received as argument `s` inside the `.sheet(name, fn)` callback.
   sheets      : ['Sheet1', 'Sheet1 2', 'Sheet2'],
   skippedRows : 0,
   error       : undefined,   // present only on failure
+}
+```
+
+#### `OracleSqlToExcel().run()` with `.file()` → `MultiRunResult`
+
+```js
+{
+  success     : true,
+  files       : [
+    { file: '/output/data_1-1000000.xlsx', startRow: 1,       endRow: 1000000 },
+    { file: '/output/data_1000001-1823400.xlsx', startRow: 1000001, endRow: 1823400 },
+  ],
+  sheets      : ['Data', 'Data 2'],
+  skippedRows : 0,
+  error       : undefined,
 }
 ```
 
@@ -217,20 +254,32 @@ Received as argument `s` inside the `.sheet(name, fn)` callback.
 #### `.toBuffer()` → `BufferResult`
 
 ```js
-{
-  success     : true,
-  buffer      : Buffer,   // empty Buffer when success=false
-  sheets      : [...],
-  skippedRows : 0,
-  error       : undefined,
-}
+{ success, buffer, sheets, skippedRows, error? }
+```
+
+#### `OracleSqlToCsv().run()` → `CsvRunResult`
+
+```js
+{ success, file, rowsWritten, error? }
+```
+
+#### `OracleSqlToCsv().pipe()` → `CsvResult`
+
+```js
+{ success, rowsWritten, error? }
+```
+
+#### `OracleSqlToCsv().toBuffer()` → `CsvBufferResult`
+
+```js
+{ success, buffer, rowsWritten, error? }
 ```
 
 ---
 
 ## Examples
 
-### Write to File
+### Excel — Write to File
 
 ```js
 const { OracleSqlToExcel } = require('@avisenaalwi/oraclesql-to-excel');
@@ -260,14 +309,9 @@ if (!result.success) {
 
 ---
 
-### Stream to Express HTTP Response
+### Excel — Stream to HTTP Response
 
 ```js
-const express        = require('express');
-const { OracleSqlToExcel } = require('@avisenaalwi/oraclesql-to-excel');
-
-const app = express();
-
 app.get('/download/report', async (req, res) => {
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="report.xlsx"');
@@ -298,20 +342,12 @@ app.get('/download/report', async (req, res) => {
 
 ---
 
-### Return as Buffer (S3 / Email)
+### Excel — Return as Buffer (S3 / Email)
 
 ```js
-const AWS            = require('aws-sdk');
-const { OracleSqlToExcel } = require('@avisenaalwi/oraclesql-to-excel');
-
-const s3 = new AWS.S3();
-
 const { success, buffer, error } = await OracleSqlToExcel()
   .connectionFactory(() => pool.getConnection())
-  .sheet('Report', s => s
-    .sql('SELECT * FROM MONTHLY_REPORT')
-    .columns(COLS)
-  )
+  .sheet('Report', s => s.sql('SELECT * FROM MONTHLY_REPORT').columns(COLS))
   .toBuffer();
 
 if (!success) throw new Error(error);
@@ -326,7 +362,7 @@ await s3.putObject({
 
 ---
 
-### Multi-Sheet Workbook
+### Excel — Multi-Sheet Workbook
 
 ```js
 const result = await OracleSqlToExcel()
@@ -345,14 +381,113 @@ const result = await OracleSqlToExcel()
     .freezeHeader()
     .onRowError('skip')   // skip bad rows instead of aborting
   )
-  .sheet('Account Ref', s => s
-    .sql('SELECT CODE, NAME, TYPE FROM MASTER_ACCOUNT ORDER BY CODE')
-    .columns(COLS_ACCOUNT)
-  )
   .run();
 
 console.log('Sheets written:', result.sheets);
-// → ['Summary', 'Detail', 'Detail 2', 'Account Ref']
+// → ['Summary', 'Detail', 'Detail 2', ...]
+```
+
+---
+
+### Multi-file Export
+
+Split one large result across multiple `.xlsx` files. Oracle's `ResultSet` stays open across files — only one query per sheet regardless of how many files are produced.
+
+```js
+const { files } = await OracleSqlToExcel()
+  .connectionFactory(() => pool.getConnection())
+  .outputDir('/var/reports')
+  .file('transactions', f => f
+    .maxRowsPerFile(1_000_000)   // one .xlsx per million rows
+    .sheet('Data', s => s
+      .sql('SELECT * FROM TRANSACTIONS WHERE YEAR = :y', { y: 2026 })
+      .columns(COLS)
+      .maxRowsPerSheet(900_000)  // split sheet within each file too
+    )
+  )
+  .run();
+
+// files → [
+//   { file: '/var/reports/transactions_1-1000000.xlsx',    startRow: 1,       endRow: 1000000 },
+//   { file: '/var/reports/transactions_1000001-1823400.xlsx', startRow: 1000001, endRow: 1823400 },
+// ]
+console.log(`${files.length} files, last row: ${files[files.length - 1].endRow}`);
+```
+
+Multiple `.file()` calls produce independent output files:
+
+```js
+await OracleSqlToExcel()
+  .connectionFactory(() => pool.getConnection())
+  .outputDir('/var/reports')
+  .file('summary', f => f.sheet('Summary', s => s.sql(SQL1).columns(COLS1)))
+  .file('detail',  f => f.sheet('Detail',  s => s.sql(SQL2).columns(COLS2)))
+  .run();
+// → /var/reports/summary.xlsx, /var/reports/detail.xlsx
+```
+
+> `.file()` is only supported with `.run()`. Using it with `.pipe()` or `.toBuffer()` throws an error.
+
+---
+
+### CSV — Write to File
+
+```js
+const { OracleSqlToCsv } = require('@avisenaalwi/oraclesql-to-excel');
+
+const { success, file, rowsWritten } = await OracleSqlToCsv()
+  .connectionFactory(() => pool.getConnection())
+  .sql('SELECT CODE, NAME, AMOUNT FROM BIG_TABLE')
+  .columns([
+    { key: 'CODE',   header: 'Code'   },
+    { key: 'NAME',   header: 'Name'   },
+    { key: 'AMOUNT', header: 'Amount' },
+  ])
+  .run('/var/reports/export.csv');
+
+console.log(`${rowsWritten} rows → ${file}`);
+```
+
+---
+
+### CSV — Stream to HTTP Response
+
+Memory stays `O(fetchSize × row_size)` regardless of total row count — no backpressure issues even for 10M+ rows.
+
+```js
+app.get('/download/csv', async (req, res) => {
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="report.csv"');
+
+  const result = await OracleSqlToCsv()
+    .connectionFactory(() => pool.getConnection())
+    .sql('SELECT CODE, NAME, AMOUNT FROM BIG_TABLE WHERE PERIOD = :p', { p: req.query.period })
+    .columns([
+      { key: 'CODE',   header: 'Code'   },
+      { key: 'NAME',   header: 'Name'   },
+      { key: 'AMOUNT', header: 'Amount' },
+    ])
+    .pipe(res);
+
+  if (!result.success) {
+    console.error('CSV export failed mid-stream:', result.error);
+  }
+});
+```
+
+---
+
+### CSV — Custom Separator
+
+```js
+// Semicolon — European Excel (avoids conflict with decimal comma)
+OracleSqlToCsv().separator(';')
+
+// Tab-separated values (TSV)
+OracleSqlToCsv().separator('\t')
+
+// No BOM — for non-Windows consumers
+OracleSqlToCsv().withBom(false)
 ```
 
 ---
@@ -366,7 +501,7 @@ s.sql(
   { branch: '019', period: '202601' }
 )
 
-// Multiple conditions
+// Multiple conditions with date binds
 s.sql(
   'SELECT * FROM TRANSACTIONS WHERE STATUS = :status AND TXN_DATE >= :from AND TXN_DATE <= :to',
   { status: 'A', from: new Date('2026-01-01'), to: new Date('2026-01-31') }
@@ -469,8 +604,6 @@ s.sql('SELECT * FROM HUGE_TABLE')
  .maxRowsPerSheet(500_000)   // split every 500k rows
 ```
 
-Sheet names follow the pattern: `"Sheet"`, `"Sheet 2"`, `"Sheet 3"`, …
-
 Control split names with an array:
 
 ```js
@@ -487,9 +620,9 @@ Each sheet gets a `"Continued from sheet: <prev>"` notice at the top and a `"Con
 
 ### Progress Tracking (WebSocket / SSE)
 
-```js
-const io = require('socket.io')(server);
+**Excel:**
 
+```js
 await OracleSqlToExcel()
   .connectionFactory(() => pool.getConnection())
   .onProgress(({ sheet, rowsWritten, skippedRows, totalRowsWritten }) => {
@@ -497,6 +630,18 @@ await OracleSqlToExcel()
   })
   .sheet('Data', s => s.sql(SQL).columns(COLS))
   .run();
+```
+
+**CSV:**
+
+```js
+await OracleSqlToCsv()
+  .connectionFactory(() => pool.getConnection())
+  .sql(SQL).columns(COLS)
+  .onProgress(({ rowsWritten }) => {
+    io.emit('export-progress', { rowsWritten });
+  })
+  .run('/tmp/export.csv');
 ```
 
 Callback fires once per Oracle fetch batch (default 50,000 rows).
@@ -528,16 +673,39 @@ if (skippedRows > 0) {
 
 ---
 
-### Auto-detect Columns (No `.columns()`)
+### Auto-detect Columns
 
 Omit `.columns()` to auto-detect from Oracle metadata. Column names and types are inferred automatically.
 
 ```js
+// Excel
 s.sql('SELECT CODE, NAME, BALANCE FROM ACCOUNTS')
-// No .columns() — all 3 columns written with Oracle names as headers
+// → all 3 columns, Oracle names as headers, types inferred from DB metadata
+
+// CSV
+OracleSqlToCsv().sql('SELECT CODE, NAME, BALANCE FROM ACCOUNTS')
+// → all 3 columns, Oracle names as headers
 ```
 
-> A warning is emitted in non-production environments. Column order depends on the SELECT clause and may change if the query or schema changes. Use `.columns()` for stable, long-term output.
+> A warning is emitted in non-production environments. Column order depends on the SELECT clause. Use `.columns()` for stable, long-term output.
+
+---
+
+### Backpressure & Memory
+
+**Excel (`.pipe()`):** After each Oracle fetch batch, the library checks process RSS. If it exceeds `.backpressureThreshold()` (default: 512 MB), the Oracle fetch pauses and polls every 200 ms until RSS drops. This handles the common case where Node.js sits behind a reverse proxy (nginx, etc.) that accepts data instantly — `stream.write()` always returns `true`, yet data accumulates in Node.js output buffers.
+
+```js
+// Pause when RSS exceeds 256 MB — tighter limit for memory-constrained deployments
+OracleSqlToExcel()
+  .backpressureThreshold(256 * 1024 * 1024)
+  .sheet('Data', s => s.sql(SQL).columns(COLS))
+  .pipe(res);
+```
+
+> `.backpressureThreshold()` has no effect on `.run()` (file writes drain naturally) or `.toBuffer()` (data collected in memory by design).
+
+**CSV (`.pipe()`):** CSV rows are plain text — far smaller than Excel's XML+ZIP output. At 50,000 rows/batch, a typical batch is a few MB of text and flushes quickly through the TCP stack. Backpressure is generally not a concern for CSV streams.
 
 ---
 
@@ -556,30 +724,17 @@ s.sql('SELECT * FROM T', {}, { autoCommit: false })
 
 ---
 
-### Backpressure & Memory (`.pipe()` only)
+## Excel vs CSV — When to Use Which
 
-When streaming to an HTTP response with `.pipe(res)`, the Oracle fetch loop runs much faster than a client can download. Without backpressure control, row XML accumulates in Node.js stream buffers — for exports with millions of rows this can easily exhaust process memory.
-
-The library handles this automatically: after each Oracle fetch batch, it checks the output stream's `writableLength`. If it exceeds the threshold, it pauses and waits for the stream to drain before fetching the next batch.
-
-**Default threshold is 16 MB.** Adjust with `.backpressureThreshold()`:
-
-```js
-// Lower threshold — pause sooner, less memory pressure, slightly slower throughput
-OracleSqlToExcel()
-  .connectionFactory(() => pool.getConnection())
-  .backpressureThreshold(8 * 1024 * 1024)   // pause at 8 MB
-  .sheet('Data', s => s.sql(SQL).columns(COLS))
-  .pipe(res);
-
-// Higher threshold — pause less often, higher throughput, more peak memory allowed
-OracleSqlToExcel()
-  .backpressureThreshold(32 * 1024 * 1024)  // pause at 32 MB
-  .sheet('Data', s => s.sql(SQL).columns(COLS))
-  .pipe(res);
-```
-
-> **Note:** `.backpressureThreshold()` has no effect on `.run()` (file writes drain naturally) or `.toBuffer()` (all data is intentionally collected in memory).
+| | Excel (`.xlsx`) | CSV |
+|---|---|---|
+| **Formatting** | Number formats, colors, fonts, freeze header, auto-filter | None |
+| **Multiple sheets** | Yes | No |
+| **Max rows per sheet** | 1,048,576 (auto-split) | Unlimited |
+| **File size** | Larger (XML inside ZIP) | Smaller (~3–10× smaller) |
+| **Memory (stream)** | Bounded via RSS polling | `O(fetchSize × row_size)` — minimal |
+| **Speed** | Slower (XML generation + ZIP) | Faster |
+| **Best for** | Formatted reports, pivot tables | Raw data exports, BI tools, large datasets |
 
 ---
 

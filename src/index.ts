@@ -112,9 +112,23 @@ export interface Result {
   error?      : string;
 }
 
+export interface FileSegment {
+  /** Absolute path to this file. */
+  file    : string;
+  /** First data row number in this file (1-based, across all files in the split). */
+  startRow: number;
+  /** Last data row number in this file (inclusive). */
+  endRow  : number;
+}
+
 export interface RunResult extends Result {
-  /** Absolute path to the written `.xlsx` file. */
+  /** Absolute path to the written `.xlsx` file. Single-file mode only. */
   file: string;
+}
+
+export interface MultiRunResult extends Result {
+  /** One entry per generated file, in order. */
+  files: FileSegment[];
 }
 
 export interface BufferResult extends Result {
@@ -125,6 +139,14 @@ export interface BufferResult extends Result {
 // ── Internal types ────────────────────────────────────────────────────────────
 
 type ColumnType = NonNullable<ColumnDef['type']>;
+
+interface SheetSegmentResult {
+  sheetNames  : string[];
+  skippedRows : number;
+  rowsWritten : number;
+  overflowRows: Record<string, unknown>[];
+  openRS      : OracleResultSet | null;
+}
 
 interface OracleMetaData {
   name        : string;
@@ -539,6 +561,59 @@ class SheetConfig {
   showTotalRows(value = true): this { this._showTotalRows = value; return this; }
 }
 
+// ── FileConfig ────────────────────────────────────────────────────────────────
+
+/**
+ * Per-file configuration used inside a `.file()` callback.
+ * Groups one or more sheets into a single logical output file.
+ * When `.maxRowsPerFile()` is set, the file is automatically split into
+ * multiple physical files when the row limit is reached.
+ *
+ * Do not instantiate directly — always obtain via {@link OracleSqlToExcelBuilder#file}.
+ *
+ * @example
+ * OracleSqlToExcel()
+ *   .file('report', f => f
+ *     .maxRowsPerFile(1_000_000)
+ *     .sheet('Detail',  s => s.sql(SQL1).columns(COLS1).maxRowsPerSheet(900_000))
+ *     .sheet('Summary', s => s.sql(SQL2).columns(COLS2))
+ *   )
+ *   .run()
+ */
+class FileConfig {
+  /** @private */ _name          : string;
+  /** @private */ _maxRowsPerFile: number;
+  /** @private */ _sheets        : SheetConfig[];
+
+  constructor(name: string) {
+    this._name           = name;
+    this._maxRowsPerFile = 0;
+    this._sheets         = [];
+  }
+
+  /**
+   * Split this file into multiple physical `.xlsx` files when data rows exceed `value`.
+   * Each file is named `<name>_<startRow>-<endRow>.xlsx` (single sheet) or
+   * `<name>_1.xlsx`, `<name>_2.xlsx`, … (multiple sheets).
+   * @param value - OPTIONAL. Default: `0` (no split — single file).
+   */
+  maxRowsPerFile(value: number): this { this._maxRowsPerFile = value; return this; }
+
+  /**
+   * Add a sheet to this file. Identical API to {@link OracleSqlToExcelBuilder#sheet}.
+   */
+  sheet(name: string | string[], fn: (s: SheetConfig) => void): this {
+    const names = Array.isArray(name) ? name : [name];
+    for (const n of names) {
+      if (n.length > 25) throw new Error(`Sheet name "${n}" exceeds 25 characters (${n.length}). Shorten the name.`);
+    }
+    const cfg = new SheetConfig(name);
+    fn(cfg);
+    this._sheets.push(cfg);
+    return this;
+  }
+}
+
 // ── Builder ───────────────────────────────────────────────────────────────────
 
 /**
@@ -585,6 +660,7 @@ class OracleSqlToExcelBuilder {
   /** @private */ _debug                  : boolean;
   /** @private */ _onProgressCb           : ((info: ProgressInfo) => void) | null;
   /** @private */ _sheets                 : SheetConfig[];
+  /** @private */ _files                  : FileConfig[];
   /** @private */ _backpressureThreshold  : number;
 
   constructor() {
@@ -596,6 +672,7 @@ class OracleSqlToExcelBuilder {
     this._debug                 = false;
     this._onProgressCb          = null;
     this._sheets                = [];
+    this._files                 = [];
     this._backpressureThreshold = 512 * 1024 * 1024; // 512 MB
   }
 
@@ -667,6 +744,33 @@ class OracleSqlToExcelBuilder {
    * .backpressureThreshold(256 * 1024 * 1024)  // pause when RSS exceeds 256 MB
    */
   backpressureThreshold(bytes: number): this { this._backpressureThreshold = bytes; return this; }
+
+  /**
+   * Add a logical file to the export. Each `.file()` call defines one output `.xlsx` file
+   * (or a set of split files if `.maxRowsPerFile()` is set inside the callback).
+   *
+   * Only applies to `.run()`. Using `.file()` with `.pipe()` or `.toBuffer()` throws an error.
+   *
+   * @param name - Base filename without extension. Combined with `.outputDir()` to form the path.
+   * @param fn   - Callback that configures the file via a {@link FileConfig} instance.
+   *
+   * @example
+   * OracleSqlToExcel()
+   *   .connectionFactory(() => pool.getConnection())
+   *   .outputDir('/tmp')
+   *   .file('laporan', f => f
+   *     .maxRowsPerFile(1_000_000)
+   *     .sheet('Detail',  s => s.sql(SQL1).columns(COLS1).maxRowsPerSheet(900_000))
+   *     .sheet('Summary', s => s.sql(SQL2).columns(COLS2))
+   *   )
+   *   .run()
+   */
+  file(name: string, fn: (f: FileConfig) => void): this {
+    const cfg = new FileConfig(name);
+    fn(cfg);
+    this._files.push(cfg);
+    return this;
+  }
 
   /**
    * Enable verbose debug logging to `console.log` at each execution stage.
@@ -952,6 +1056,287 @@ class OracleSqlToExcelBuilder {
   }
 
   /**
+   * Like _executeSheet but stops after maxRows data rows, returning any unprocessed
+   * rows and the open ResultSet so the caller can continue in the next file.
+   * @private
+   */
+  async _executeSheetSegment(
+    connection  : OracleConnection,
+    workbook    : StreamWorkbook,
+    sheetCfg    : SheetConfig,
+    progressCtx : ProgressCtx,
+    drainFn     : (() => Promise<void>) | null,
+    maxRows     : number,
+    pendingRows : Record<string, unknown>[],
+    existingRS  : OracleResultSet | null
+  ): Promise<SheetSegmentResult> {
+    const sheetNames                          : string[]        = [];
+    let   sheetIndex                                            = 0;
+    let   rowCounter                                            = 0;
+    let   totalRows                                             = 0;
+    let   skippedRows                                           = 0;
+    let   fileRowsWritten                                       = 0;
+    let   resolvedColDefs : ColumnDef[] | null                  = sheetCfg._columns.length > 0 ? sheetCfg._columns : null;
+    let   worksheet       : StreamWorksheet                     = null!;
+    let   resultSet       : OracleResultSet | null              = null;
+    let   earlyReturn                                           = false;
+    let   overflowRows    : Record<string, unknown>[]           = [];
+
+    const createNewSheet = (): void => {
+      const name = resolveSheetName(sheetCfg._name, sheetIndex);
+      if (name.length > 25) throw new Error(`Sheet name "${name}" exceeds 25 characters (${name.length}).`);
+      worksheet = workbook.addWorksheet(name);
+      sheetNames.push(name);
+      const colCount = resolvedColDefs ? resolvedColDefs.length : 1;
+      let prependedRows = 0;
+      if (resolvedColDefs) worksheet.columns = buildColumnSpec(resolvedColDefs);
+      if (sheetIndex === 0 && sheetCfg._docHeader?.length > 0) {
+        prependedRows = writeDocHeaderRows(worksheet, sheetCfg._docHeader, colCount);
+      }
+      if (sheetIndex > 0) {
+        const prevName = resolveSheetName(sheetCfg._name, sheetIndex - 1);
+        const prevRow  = worksheet.addRow([`Continued from sheet: ${prevName}`]);
+        prevRow.font   = { italic: true, color: { argb: 'FF808080' } };
+        if (colCount > 1) worksheet.mergeCells(prevRow.number, 1, prevRow.number, colCount);
+        prevRow.commit();
+        prependedRows++;
+      }
+      if (sheetCfg._resolvedTotalRows != null) {
+        const fmt      = (n: number): string => n.toLocaleString('en-US');
+        const start    = sheetIndex * sheetCfg._maxRowsPerSheet + 1;
+        const end      = Math.min((sheetIndex + 1) * sheetCfg._maxRowsPerSheet, sheetCfg._resolvedTotalRows);
+        const rangeRow = worksheet.addRow([`Showing rows ${fmt(start)} – ${fmt(end)} of ${fmt(sheetCfg._resolvedTotalRows)} total`]);
+        rangeRow.font  = { italic: true, color: { argb: 'FF404040' } };
+        if (colCount > 1) worksheet.mergeCells(rangeRow.number, 1, rangeRow.number, colCount);
+        rangeRow.commit();
+        prependedRows++;
+      }
+      if (resolvedColDefs) {
+        const headerRowNum = prependedRows + 1;
+        if (sheetCfg._freezeHeader) worksheet.views = [{ state: 'frozen', ySplit: headerRowNum }];
+        if (sheetCfg._autoFilter) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (worksheet as any).autoFilter = { from: { row: headerRowNum, column: 1 }, to: { row: headerRowNum, column: resolvedColDefs.length } };
+        }
+        writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
+      }
+    };
+
+    try {
+      const sheetLabel = Array.isArray(sheetCfg._name) ? sheetCfg._name[0] : sheetCfg._name;
+
+      if (existingRS) {
+        resultSet = existingRS;
+      } else {
+        let sql = sheetCfg._sql;
+        if (resolvedColDefs) {
+          const trimmed = sheetCfg._sql.trim().replace(/;+$/, '');
+          if (!/^\s*WITH\s+/i.test(trimmed)) sql = `SELECT ${resolvedColDefs.map((c) => c.key).join(', ')} FROM (${trimmed})`;
+        }
+        const execResult = await connection.execute(sql, sheetCfg._param, {
+          autoCommit: true, ...this._executeOptions, ...sheetCfg._executeOptions,
+          outFormat: OUT_FORMAT_OBJECT, resultSet: true, fetchArraySize: sheetCfg._fetchSize,
+        });
+        resultSet = execResult.resultSet ?? null;
+        if (!resolvedColDefs && execResult.metaData?.length) {
+          resolvedColDefs = execResult.metaData.map((m) => ({ key: m.name, header: m.name, type: oracleTypeToColType(m.dbTypeName) }));
+        }
+      }
+
+      createNewSheet();
+
+      let rows = pendingRows.length > 0 ? pendingRows : await resultSet!.getRows(sheetCfg._fetchSize);
+
+      while (rows.length > 0) {
+        const batchRowsBefore = totalRows;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (fileRowsWritten >= maxRows) {
+            earlyReturn  = true;
+            overflowRows = rows.slice(i);
+            break;
+          }
+
+          const row = rows[i];
+          let rowWritten = false;
+          try {
+            const rowData: Record<string, unknown> = {};
+            resolvedColDefs!.forEach(({ key, type = 'text' }) => { rowData[key] = castCell(row[key], type); });
+            worksheet.addRow(rowData).commit();
+            rowWritten = true;
+          } catch (rowErr) {
+            if (sheetCfg._onRowError === 'throw') throw rowErr;
+            skippedRows++;
+          }
+
+          if (rowWritten) {
+            rowCounter++;
+            totalRows++;
+            fileRowsWritten++;
+
+            if (rowCounter >= sheetCfg._maxRowsPerSheet) {
+              const nextSheetName = resolveSheetName(sheetCfg._name, sheetIndex + 1);
+              const colCount      = resolvedColDefs ? resolvedColDefs.length : 1;
+              worksheet.addRow(['']).commit();
+              const infoRow = worksheet.addRow([`Continued on sheet: ${nextSheetName}`]);
+              infoRow.font  = { italic: true, color: { argb: 'FF404040' } };
+              if (colCount > 1) worksheet.mergeCells(infoRow.number, 1, infoRow.number, colCount);
+              infoRow.commit();
+              await worksheet.commit();
+              sheetIndex++;
+              rowCounter = 0;
+              createNewSheet();
+            }
+          }
+        }
+
+        if (this._onProgressCb) {
+          progressCtx.totalRowsWritten += totalRows - batchRowsBefore;
+          this._onProgressCb({ sheet: sheetLabel, rowsWritten: totalRows, skippedRows, totalRowsWritten: progressCtx.totalRowsWritten });
+        }
+
+        if (earlyReturn) break;
+        if (drainFn) await drainFn();
+        rows = await resultSet!.getRows(sheetCfg._fetchSize);
+      }
+
+      await worksheet.commit();
+      return { sheetNames, skippedRows, rowsWritten: fileRowsWritten, overflowRows, openRS: earlyReturn ? resultSet! : null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[OracleSqlToExcel:ERROR] _executeSheetSegment FAILED — ${msg}`);
+      throw err;
+    } finally {
+      if (resultSet && !earlyReturn) await resultSet.close().catch(() => {});
+    }
+  }
+
+  /**
+   * Multi-file execution: splits one sheet's result across multiple .xlsx files.
+   * @private
+   */
+  async _executeFileConfig(cfg: FileConfig): Promise<MultiRunResult> {
+    const allSheets   : string[]      = [];
+    const allFiles    : FileSegment[] = [];
+    const progressCtx : ProgressCtx   = { totalRowsWritten: 0 };
+    let   totalSkipped                = 0;
+    let   connection  : OracleConnection | null = null;
+
+    // Per-sheet state carried across files
+    interface SheetState {
+      openRS  : OracleResultSet | null;
+      pending : Record<string, unknown>[];
+      done    : boolean;
+      // row counters for single-sheet filename suffix
+      globalStart: number;
+      globalEnd  : number;
+    }
+
+    try {
+      connection = await this._connectionFactory!();
+
+      // COUNT queries
+      await Promise.all(cfg._sheets.map(async (sheetCfg) => {
+        const label = Array.isArray(sheetCfg._name) ? sheetCfg._name[0] : sheetCfg._name;
+        if (!sheetCfg._showTotalRows) return;
+        try {
+          const trimmed = sheetCfg._sql.trim().replace(/;+$/, '');
+          if (/^\s*WITH\s+/i.test(trimmed)) return;
+          const countConn = await this._connectionFactory!();
+          try {
+            const result = await countConn.execute(`SELECT COUNT(*) AS TOTAL FROM (${trimmed})`, sheetCfg._param, { outFormat: OUT_FORMAT_OBJECT });
+            sheetCfg._resolvedTotalRows = (result.rows?.[0]?.['TOTAL'] as number | undefined) ?? null;
+          } finally {
+            await countConn.close().catch(() => {});
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[OracleSqlToExcel:ERROR] COUNT query failed for sheet "${label}": ${msg}`);
+        }
+      }));
+
+      const rssThreshold = this._backpressureThreshold;
+      const drainFn: (() => Promise<void>) | null = rssThreshold > 0
+        ? async () => {
+            if (process.memoryUsage().rss <= rssThreshold) return;
+            const started = Date.now();
+            while (process.memoryUsage().rss > rssThreshold) {
+              if (Date.now() - started > 30_000) break;
+              await new Promise<void>(r => setTimeout(r, 200));
+            }
+          }
+        : null;
+
+      // Each file contains ALL sheets. Exhausted sheets are skipped in subsequent files.
+      // Single-sheet → row-range filename. Multi-sheet → sequential index filename.
+      const isSingleSheet = cfg._sheets.length === 1;
+      const maxRows       = cfg._maxRowsPerFile > 0 ? cfg._maxRowsPerFile : Number.MAX_SAFE_INTEGER;
+      const states        = new Map<SheetConfig, SheetState>(
+        cfg._sheets.map((s) => [s, { openRS: null, pending: [], done: false, globalStart: 1, globalEnd: 0 }])
+      );
+
+      let fileIndex = 0;
+
+      while ([...states.values()].some((st) => !st.done)) {
+        const tempFile = path.join(this._outputDir, `${cfg._name}__tmp_${fileIndex}.xlsx`);
+
+        const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+          filename        : tempFile,
+          useStyles       : true,
+          useSharedStrings: false,
+          zip             : this._compress ? undefined : { zlib: { level: 0 } },
+        } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
+
+        let fileFirstSheetStart = 0;
+        let fileFirstSheetEnd   = 0;
+
+        for (const sheetCfg of cfg._sheets) {
+          const st = states.get(sheetCfg)!;
+          if (st.done) continue;
+
+          const seg = await this._executeSheetSegment(
+            connection, workbook, sheetCfg, progressCtx, drainFn,
+            maxRows, st.pending, st.openRS
+          );
+
+          st.globalEnd = st.globalStart + seg.rowsWritten - 1;
+          if (isSingleSheet) {
+            fileFirstSheetStart = st.globalStart;
+            fileFirstSheetEnd   = st.globalEnd;
+          }
+
+          allSheets.push(...seg.sheetNames);
+          totalSkipped += seg.skippedRows;
+
+          st.globalStart = st.globalEnd + 1;
+          st.openRS      = seg.openRS;
+          st.pending     = seg.overflowRows;
+          st.done        = seg.openRS === null && seg.overflowRows.length === 0;
+        }
+
+        await workbook.commit();
+
+        const finalFile = isSingleSheet
+          ? path.join(this._outputDir, `${cfg._name}_${fileFirstSheetStart}-${fileFirstSheetEnd}.xlsx`)
+          : path.join(this._outputDir, `${cfg._name}_${fileIndex + 1}.xlsx`);
+
+        await fs.promises.rename(tempFile, finalFile);
+        allFiles.push({ file: finalFile, startRow: fileFirstSheetStart, endRow: fileFirstSheetEnd });
+
+        fileIndex++;
+      }
+
+      return { success: true, files: allFiles, sheets: allSheets, skippedRows: totalSkipped };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[OracleSqlToExcel:ERROR] _executeFileConfig FAILED — ${msg}`);
+      return { success: false, error: msg, files: allFiles, sheets: allSheets, skippedRows: totalSkipped };
+    } finally {
+      if (connection) await connection.close().catch(() => {});
+    }
+  }
+
+  /**
    * Core execution logic shared by `.run()`, `.pipe()`, and `.toBuffer()`.
    * @private
    */
@@ -1146,7 +1531,26 @@ class OracleSqlToExcelBuilder {
    * Execute and write the workbook to an `.xlsx` file on disk.
    * Deletes the partial file automatically if an error occurs mid-export.
    */
-  async run(): Promise<RunResult> {
+  async run(): Promise<RunResult | MultiRunResult> {
+    if (this._files.length > 0) {
+      if (this._files.length === 1) {
+        return this._executeFileConfig(this._files[0]);
+      }
+      // Multiple .file() calls: run each in sequence, merge into one MultiRunResult
+      const allFiles  : FileSegment[] = [];
+      const allSheets : string[]      = [];
+      let totalSkipped = 0;
+      let success      = true;
+      let firstError   : string | undefined;
+      for (const fileCfg of this._files) {
+        const r = await this._executeFileConfig(fileCfg);
+        allFiles.push(...r.files);
+        allSheets.push(...r.sheets);
+        totalSkipped += r.skippedRows;
+        if (!r.success) { success = false; firstError = firstError ?? r.error; }
+      }
+      return { success, files: allFiles, sheets: allSheets, skippedRows: totalSkipped, ...(firstError ? { error: firstError } : {}) };
+    }
     const file   = path.join(this._outputDir, `${this._filePrefix}.xlsx`);
     const result = await this._execute({ filename: file });
     if (!result.success) {
@@ -1166,6 +1570,9 @@ class OracleSqlToExcelBuilder {
    * await OracleSqlToExcel().sheet('Data', s => s.sql(SQL).columns(COLS)).pipe(res);
    */
   async pipe(writableStream: Writable): Promise<Result> {
+    if (this._files.length > 0) {
+      throw new Error('.pipe() does not support .file() — multi-file output requires .run().');
+    }
     return this._execute({ stream: writableStream });
   }
 
@@ -1179,6 +1586,9 @@ class OracleSqlToExcelBuilder {
    * await s3.putObject({ Body: buffer, Key: 'report.xlsx' }).promise();
    */
   async toBuffer(): Promise<BufferResult> {
+    if (this._files.length > 0) {
+      throw new Error('.toBuffer() does not support .file() — multi-file output requires .run().');
+    }
     const chunks: Buffer[] = [];
     const pass             = new PassThrough();
     pass.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -1210,3 +1620,281 @@ function OracleSqlToExcel(): OracleSqlToExcelBuilder {
 
 export { OracleSqlToExcel };
 export default OracleSqlToExcel;
+
+// ── CSV types ─────────────────────────────────────────────────────────────────
+
+export interface CsvResult {
+  success    : boolean;
+  rowsWritten: number;
+  error?     : string;
+}
+
+export interface CsvRunResult extends CsvResult {
+  /** Absolute path to the written `.csv` file. */
+  file: string;
+}
+
+export interface CsvBufferResult extends CsvResult {
+  /** In-memory CSV buffer. Empty `Buffer` when `success` is `false`. */
+  buffer: Buffer;
+}
+
+// ── CSV helpers ───────────────────────────────────────────────────────────────
+
+/** @private */
+function escapeCsvField(value: string, separator: string): string {
+  if (value.includes(separator) || value.includes('"') || value.includes('\n') || value.includes('\r')) {
+    return '"' + value.replace(/"/g, '""') + '"';
+  }
+  return value;
+}
+
+// ── OracleSqlToCsvBuilder ─────────────────────────────────────────────────────
+
+/**
+ * Fluent builder that streams Oracle SQL results directly into a `.csv` file or stream.
+ *
+ * CSV streaming writes each row directly to the output without intermediate buffering —
+ * no ZIP archiver, no ExcelJS workbook. Memory usage is O(fetchSize × row_size) regardless
+ * of total row count, making it ideal for very large exports (1M+ rows).
+ *
+ * Configure the query via `.sql()`, optional columns via `.columns()`, then call a terminal method.
+ *
+ * @example
+ * // Stream to Express response
+ * res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+ * res.setHeader('Content-Disposition', 'attachment; filename="report.csv"');
+ * await OracleSqlToCsv()
+ *   .connectionFactory(() => pool.getConnection())
+ *   .sql('SELECT CODE, NAME, AMOUNT FROM BIG_TABLE')
+ *   .columns([{ key: 'CODE', header: 'Code' }, { key: 'NAME', header: 'Name' }, { key: 'AMOUNT', header: 'Amount' }])
+ *   .pipe(res);
+ *
+ * @example
+ * // Write to file
+ * const { file } = await OracleSqlToCsv()
+ *   .connectionFactory(() => pool.getConnection())
+ *   .sql('SELECT * FROM BIG_TABLE')
+ *   .run('/tmp/export.csv');
+ */
+class OracleSqlToCsvBuilder {
+  /** @private */ _connectionFactory : (() => Promise<OracleConnection>) | null;
+  /** @private */ _sql               : string;
+  /** @private */ _param             : Record<string, unknown>;
+  /** @private */ _executeOptions    : Record<string, unknown>;
+  /** @private */ _columns           : Pick<ColumnDef, 'key' | 'header'>[];
+  /** @private */ _fetchSize         : number;
+  /** @private */ _separator         : string;
+  /** @private */ _withBom           : boolean;
+  /** @private */ _onProgressCb      : ((info: { rowsWritten: number }) => void) | null;
+
+  constructor() {
+    this._connectionFactory = null;
+    this._sql               = '';
+    this._param             = {};
+    this._executeOptions    = {};
+    this._columns           = [];
+    this._fetchSize         = 50_000;
+    this._separator         = ',';
+    this._withBom           = true;
+    this._onProgressCb      = null;
+  }
+
+  /**
+   * Factory function that returns a new Oracle connection. Called once per export.
+   * @example .connectionFactory(() => pool.getConnection())
+   */
+  connectionFactory(fn: () => Promise<OracleConnection>): this { this._connectionFactory = fn; return this; }
+
+  /**
+   * Oracle SQL query with optional bind parameters and execute options.
+   * @example .sql('SELECT * FROM T WHERE CODE = :code', { code: '019' })
+   */
+  sql(
+    query          : string,
+    param          : Record<string, unknown> = {},
+    executeOptions : Record<string, unknown> = {}
+  ): this {
+    this._sql            = query;
+    this._param          = param;
+    this._executeOptions = executeOptions;
+    return this;
+  }
+
+  /**
+   * Column definitions. Only `key` and `header` are used for CSV (no type, style, or format).
+   * Omit to auto-detect columns from Oracle metadata in their SELECT order.
+   */
+  columns(value: Pick<ColumnDef, 'key' | 'header'>[]): this { this._columns = value; return this; }
+
+  /**
+   * Rows fetched from Oracle per round-trip. Default: `50_000`.
+   */
+  fetchSize(value: number): this { this._fetchSize = value; return this; }
+
+  /**
+   * CSV field separator. Default: `','`.
+   * @example .separator(';')  // European Excel
+   * @example .separator('\t') // TSV
+   */
+  separator(value: string): this { this._separator = value; return this; }
+
+  /**
+   * Prepend a UTF-8 BOM (`﻿`) so Windows Excel opens the file with correct encoding.
+   * Default: `true`.
+   */
+  withBom(value = true): this { this._withBom = value; return this; }
+
+  /**
+   * Callback invoked after each fetch batch is written.
+   * @example .onProgress(({ rowsWritten }) => console.log(rowsWritten))
+   */
+  onProgress(cb: (info: { rowsWritten: number }) => void): this { this._onProgressCb = cb; return this; }
+
+  // ── Internal ────────────────────────────────────────────────────────────────
+
+  /** @private */
+  async _execute(stream: Writable): Promise<CsvResult> {
+    let connection : OracleConnection | null = null;
+    let resultSet  : OracleResultSet  | null = null;
+    let rowsWritten = 0;
+
+    const write = (data: string): void => { stream.write(data); };
+
+    try {
+      if (!this._connectionFactory) throw new Error('No connection factory set.');
+      if (!this._sql?.trim())        throw new Error('No SQL query set.');
+
+      connection = await this._connectionFactory();
+
+      const execResult = await connection.execute(this._sql, this._param, {
+        autoCommit    : true,
+        ...this._executeOptions,
+        outFormat     : OUT_FORMAT_OBJECT,
+        resultSet     : true,
+        fetchArraySize: this._fetchSize,
+      });
+
+      resultSet = execResult.resultSet ?? null;
+
+      // Resolve columns: explicit definition or Oracle metadata
+      let cols = this._columns.length > 0
+        ? this._columns
+        : (execResult.metaData ?? []).map((m) => ({ key: m.name, header: m.name }));
+
+      if (cols.length === 0) {
+        // No metadata available — will resolve from first row
+        let rows = await resultSet!.getRows(1);
+        if (rows.length > 0) {
+          cols = Object.keys(rows[0]).map((k) => ({ key: k, header: k }));
+          // Write BOM + header before processing this pre-fetched row
+          if (this._withBom) write('﻿');
+          write(cols.map((c) => escapeCsvField(c.header ?? c.key, this._separator)).join(this._separator) + '\n');
+          for (const row of rows) {
+            write(cols.map((c) => escapeCsvField(String(row[c.key] ?? ''), this._separator)).join(this._separator) + '\n');
+            rowsWritten++;
+          }
+          if (this._onProgressCb) this._onProgressCb({ rowsWritten });
+          rows = await resultSet!.getRows(this._fetchSize);
+          while (rows.length > 0) {
+            const lines = rows.map((row) =>
+              cols.map((c) => escapeCsvField(String(row[c.key] ?? ''), this._separator)).join(this._separator) + '\n'
+            ).join('');
+            write(lines);
+            rowsWritten += rows.length;
+            if (this._onProgressCb) this._onProgressCb({ rowsWritten });
+            rows = await resultSet!.getRows(this._fetchSize);
+          }
+          return { success: true, rowsWritten };
+        }
+        return { success: true, rowsWritten: 0 };
+      }
+
+      // Write BOM + header
+      if (this._withBom) write('﻿');
+      write(cols.map((c) => escapeCsvField(c.header ?? c.key, this._separator)).join(this._separator) + '\n');
+
+      // Stream rows batch by batch — no intermediate accumulation
+      let rows = await resultSet!.getRows(this._fetchSize);
+      while (rows.length > 0) {
+        const lines = rows.map((row) =>
+          cols.map((c) => escapeCsvField(String(row[c.key] ?? ''), this._separator)).join(this._separator) + '\n'
+        ).join('');
+        write(lines);
+        rowsWritten += rows.length;
+        if (this._onProgressCb) this._onProgressCb({ rowsWritten });
+        rows = await resultSet!.getRows(this._fetchSize);
+      }
+
+      return { success: true, rowsWritten };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[OracleSqlToCsv:ERROR] ${msg}`);
+      if (!stream.writableEnded) stream.end();
+      return { success: false, rowsWritten, error: msg };
+    } finally {
+      if (resultSet)  await resultSet.close().catch(() => {});
+      if (connection) await connection.close().catch(() => {});
+    }
+  }
+
+  // ── Terminal methods ───────────────────────────────────────────────────────
+
+  /**
+   * Write CSV to a file at `filepath`.
+   * @param filepath - Absolute or relative path including filename and extension (e.g. `'/tmp/report.csv'`).
+   */
+  async run(filepath: string): Promise<CsvRunResult> {
+    const stream = fs.createWriteStream(filepath);
+    const done   = new Promise<void>((resolve, reject) => {
+      stream.on('finish', resolve);
+      stream.on('error', reject);
+    });
+    const result = await this._execute(stream);
+    if (!stream.writableEnded) stream.end();
+    await done.catch(() => {});
+    if (!result.success) fs.promises.unlink(filepath).catch(() => {});
+    return { ...result, file: filepath };
+  }
+
+  /**
+   * Stream CSV directly to any Writable (e.g. Express `res`).
+   *
+   * @example
+   * res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+   * res.setHeader('Content-Disposition', 'attachment; filename="report.csv"');
+   * await OracleSqlToCsv().connectionFactory(...).sql(SQL).pipe(res);
+   */
+  async pipe(writableStream: Writable): Promise<CsvResult> {
+    return this._execute(writableStream);
+  }
+
+  /**
+   * Return the entire CSV as an in-memory `Buffer`.
+   * For large datasets prefer `.run()` or `.pipe()` to avoid holding all data in memory.
+   */
+  async toBuffer(): Promise<CsvBufferResult> {
+    const chunks: Buffer[] = [];
+    const pass             = new PassThrough();
+    pass.on('data', (chunk: Buffer) => chunks.push(chunk));
+    const done = new Promise<void>((resolve, reject) => {
+      pass.on('finish', resolve);
+      pass.on('error', reject);
+    });
+    const result = await this._execute(pass);
+    if (!pass.writableEnded) pass.end();
+    await done.catch(() => {});
+    return { ...result, buffer: result.success ? Buffer.concat(chunks) : Buffer.alloc(0) };
+  }
+}
+
+// ── CSV Factory ───────────────────────────────────────────────────────────────
+
+/**
+ * Create a new {@link OracleSqlToCsvBuilder} instance.
+ */
+function OracleSqlToCsv(): OracleSqlToCsvBuilder {
+  return new OracleSqlToCsvBuilder();
+}
+
+export { OracleSqlToCsv };
