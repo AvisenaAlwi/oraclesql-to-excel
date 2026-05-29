@@ -320,3 +320,23 @@ describe('run() + asZip()', () => {
     fs.rmSync(tmpDir, { recursive: true });
   });
 });
+
+// ── asZip() without .file() ──────────────────────────────────────────────────────
+
+describe('asZip() without .file()', () => {
+  const rows    = makeRows(2);
+  const factory = () => Promise.resolve(createStreamConn(rows, COLS.map((c) => ({ name: c.key }))));
+
+  it('toBuffer() returns plain XLSX (not ZIP) when asZip() used with .sheet() only', async () => {
+    const { success, buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      .asZip() // ignored — no .file()
+      .toBuffer();
+
+    expect(success).toBe(true);
+    // Verify it can be parsed as XLSX (not as a ZIP container):
+    const [{ rows: parsed }] = await readBuffer(buffer);
+    expect(parsed).toHaveLength(2);
+  });
+});

@@ -48,6 +48,7 @@ describe('OracleSqlToExcelBuilder — validation', () => {
       .filePrefix('test')
       .compress(true)
       .debug(false)
+      .asZip(true)
       .onProgress(() => {})
       .executeOptions({ autoCommit: true })
       .sheet('S', (s) => s.sql('SELECT 1 FROM DUAL').freezeHeader().autoFilter());
