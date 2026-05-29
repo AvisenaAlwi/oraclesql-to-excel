@@ -430,6 +430,101 @@ await OracleSqlToExcel()
 
 ---
 
+## ZIP Streaming
+
+When `.file()` produces multiple `.xlsx` files, use `.asZip()` to deliver them as a single ZIP archive. This is the only way to stream multi-file output via `.pipe()` or `.toBuffer()`.
+
+### Stream ZIP to HTTP response
+
+```js
+// Express / Fastify
+res.setHeader('Content-Type', 'application/zip');
+res.setHeader('Content-Disposition', 'attachment; filename="export.zip"');
+
+await OracleSqlToExcel()
+  .connectionFactory(() => pool.getConnection())
+  .file('report', (f) => f
+    .maxRowsPerFile(1_000_000)
+    .sheet('Data', (s) => s
+      .sql('SELECT * FROM BIG_TABLE')
+      .columns(COLS)
+      .maxRowsPerSheet(500_000)
+    )
+  )
+  .asZip()
+  .pipe(res); // streams ZIP directly — no temp file
+```
+
+### Write ZIP to disk
+
+```js
+const result = await OracleSqlToExcel()
+  .connectionFactory(() => pool.getConnection())
+  .outputDir('/tmp')
+  .filePrefix('export-2026')      // ZIP written as /tmp/export-2026.zip
+  .file('report', (f) => f
+    .maxRowsPerFile(1_000_000)
+    .sheet('Data', (s) => s.sql(SQL).columns(COLS))
+  )
+  .asZip()
+  .run();
+
+console.log(result.file); // /tmp/export-2026.zip
+```
+
+### ZIP entry names
+
+Entries inside the ZIP use sequential naming:
+
+```
+export-2026.zip
+  ├─ report_1.xlsx   ← rows 1–1,000,000
+  ├─ report_2.xlsx   ← rows 1,000,001–2,000,000
+  └─ report_3.xlsx   ← rows 2,000,001–2,700,000
+```
+
+`.asZip()` is only effective when `.file()` is also used. Without `.file()`, it is ignored and output is a plain `.xlsx`.
+
+---
+
+## Memory guide
+
+The library streams rows from Oracle in batches and writes them through ExcelJS to the output. Memory stays bounded by the batch size, not the total row count — **for most use cases**.
+
+### What controls memory
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `.fetchSize(n)` (per sheet) | 50,000 | Rows fetched per Oracle round-trip. Reduce for very wide rows. |
+| `.backpressureThreshold(bytes)` | 256 MB | RSS threshold — Oracle fetch pauses when exceeded. |
+| `.maxRowsPerFile(n)` (per file) | unlimited | Bounds the size of each XLSX file processed at once. |
+
+### When OOM can still occur
+
+RSS polling is **reactive** — it checks after each batch, not during. If a single batch generates more RSS than available memory, the process will OOM before the pause fires.
+
+**Mitigation for very wide rows or limited server RAM:**
+
+```js
+OracleSqlToExcel()
+  .backpressureThreshold(128 * 1024 * 1024) // 128 MB — pause earlier
+  .file('report', (f) => f
+    .maxRowsPerFile(500_000)                  // smaller files = lower peak
+    .sheet('Data', (s) => s
+      .fetchSize(10_000)                      // smaller batches for wide rows
+      .sql(SQL).columns(COLS)
+    )
+  )
+  .asZip()
+  .pipe(res);
+```
+
+### `.toBuffer()` warning
+
+`.toBuffer()` holds the **entire ZIP in memory** before returning. For large exports this will OOM. Use `.run()` (disk) or `.pipe()` (stream) instead.
+
+---
+
 ### CSV — Write to File
 
 ```js
