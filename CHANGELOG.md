@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.4] - 2026-05-30
+
+### Added
+
+- **Cross-file navigation notes** — when a query is split across multiple files (via `maxRowsPerFile`), each file now contains informational rows at the sheet boundary:
+  - First sheet of file 2+: `"Previous data on file: {name}_1.xlsx"` (italic, gray) immediately after the column header row.
+  - Last active sheet of files 1 to N-1: an empty row followed by `"Next data available on file: {name}_2.xlsx"` (italic, gray) before the file ends.
+  - Notes use the same visual style as the existing within-file sheet continuation notes (`"Continued on sheet: …"` / `"Continued from sheet: …"`).
+
+### Fixed
+
+- **Sheet split no longer creates empty sheets at file boundary** — when `rowCounter >= maxRowsPerSheet` occurred on the exact same row as `fileRowsWritten >= maxRowsPerFile`, an empty continuation sheet was created inside the current file before earlyReturn fired. The split check now skips the sheet transition when the file limit is also reached, preventing the spurious empty sheet.
+- **`maxRowsPerSheet` no longer interferes with `maxRowsPerFile` enforcement** — previously, if `maxRowsPerSheet` was set larger than `maxRowsPerFile`, the sheet split could trigger at exactly the file boundary, creating an empty sheet that received the cross-file navigation note instead of the last data sheet. This is now handled correctly.
+
+### Changed
+
+- **File naming simplified to `{name}_{part}.xlsx`** — `.run()` without `.asZip()` (`MultiRunResult`) now uses sequential numbering (`data_1.xlsx`, `data_2.xlsx`) instead of row-range naming (`data_1-1000000.xlsx`). ZIP entries (`.asZip()`) were already using sequential naming. `MultiRunResult.files[].startRow` and `.endRow` are now always `0` (field retained for backwards-compatibility).
+
+---
+
 ## [2.0.3] - 2026-05-30
 
 ### Changed
