@@ -1151,6 +1151,13 @@ class OracleSqlToExcelBuilder {
       if (sheetIndex === 0 && sheetCfg._docHeader?.length > 0) {
         prependedRows = writeDocHeaderRows(worksheet, sheetCfg._docHeader, colCount);
       }
+      if (sheetIndex === 0 && prevFileNote) {
+        const noteRow = worksheet.addRow([prevFileNote]);
+        noteRow.font  = { italic: true, color: { argb: 'FF808080' } };
+        if (colCount > 1) worksheet.mergeCells(noteRow.number, 1, noteRow.number, colCount);
+        noteRow.commit();
+        prependedRows++;
+      }
       if (sheetIndex > 0) {
         const prevName = resolveSheetName(sheetCfg._name, sheetIndex - 1);
         const prevRow  = worksheet.addRow([`Continued from sheet: ${prevName}`]);
@@ -1177,12 +1184,6 @@ class OracleSqlToExcelBuilder {
           (worksheet as any).autoFilter = { from: { row: headerRowNum, column: 1 }, to: { row: headerRowNum, column: resolvedColDefs.length } };
         }
         writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
-      }
-      if (sheetIndex === 0 && prevFileNote) {
-        const noteRow = worksheet.addRow([prevFileNote]);
-        noteRow.font  = { italic: true, color: { argb: 'FF808080' } };
-        if (resolvedColDefs && resolvedColDefs.length > 1) worksheet.mergeCells(noteRow.number, 1, noteRow.number, resolvedColDefs.length);
-        noteRow.commit();
       }
     };
 

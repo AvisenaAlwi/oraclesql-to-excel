@@ -420,7 +420,7 @@ console.log(`${files.length} file(s) written`);
 ```
 
 > **Cross-file navigation notes** — when a query spans multiple files, the library automatically inserts informational rows at file boundaries so the reader knows where data continues:
-> - **Start of file 2+** (after column headers): `"Previous data on file: transactions_1.xlsx"` — italic, gray
+> - **Start of file 2+** (before "Showing rows…" and column headers): `"Previous data on file: transactions_1.xlsx"` — italic, gray
 > - **End of files 1 to N-1** (after last data row): `"Next data available on file: transactions_2.xlsx"` — italic, gray
 >
 > These use the same visual style as the within-file sheet continuation notes (`"Continued on sheet: …"`).
