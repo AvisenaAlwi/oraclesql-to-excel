@@ -115,11 +115,7 @@ export interface Result {
 
 export interface FileSegment {
   /** Absolute path to this file. */
-  file    : string;
-  /** First data row number in this file (1-based, across all files in the split). */
-  startRow: number;
-  /** Last data row number in this file (inclusive). */
-  endRow  : number;
+  file: string;
 }
 
 export interface RunResult extends Result {
@@ -599,14 +595,16 @@ class FileConfig {
 
   /**
    * Split this file into multiple physical `.xlsx` files when data rows exceed `value`.
-   * Each file is named `<name>_<startRow>-<endRow>.xlsx` (single sheet) or
-   * `<name>_1.xlsx`, `<name>_2.xlsx`, … (multiple sheets).
+   * Each file is named `<name>_<part>.xlsx`.
+   * Rows that exceed `.maxRowsPerSheet()` auto-continue on Sheet 2, Sheet 3, … within the same file.
    * @param value - OPTIONAL. Default: `0` (no split — single file).
    */
   maxRowsPerFile(value: number): this { this._maxRowsPerFile = value; return this; }
 
   /**
    * Add a sheet to this file. Identical API to {@link OracleSqlToExcelBuilder#sheet}.
+   * When the query rows exceed `.maxRowsPerSheet()`, the library automatically
+   * continues on Sheet 2, Sheet 3, … within the same file.
    */
   sheet(name: string | string[], fn: (s: SheetConfig) => void): this {
     const names = Array.isArray(name) ? name : [name];
@@ -1115,7 +1113,9 @@ class OracleSqlToExcelBuilder {
     maxRows         : number,
     pendingRows     : Record<string, unknown>[],
     existingRS      : OracleResultSet | null,
-    globalRowOffset : number = 0
+    globalRowOffset : number = 0,
+    prevFileNote    : string | undefined = undefined,
+    nextFileNote    : string | undefined = undefined
   ): Promise<SheetSegmentResult> {
     const sheetNames                          : string[]        = [];
     let   sheetIndex                                            = 0;
@@ -1166,6 +1166,12 @@ class OracleSqlToExcelBuilder {
           (worksheet as any).autoFilter = { from: { row: headerRowNum, column: 1 }, to: { row: headerRowNum, column: resolvedColDefs.length } };
         }
         writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
+      }
+      if (sheetIndex === 0 && prevFileNote) {
+        const noteRow = worksheet.addRow([prevFileNote]);
+        noteRow.font  = { italic: true, color: { argb: 'FF808080' } };
+        if (resolvedColDefs && resolvedColDefs.length > 1) worksheet.mergeCells(noteRow.number, 1, noteRow.number, resolvedColDefs.length);
+        noteRow.commit();
       }
     };
 
@@ -1221,7 +1227,7 @@ class OracleSqlToExcelBuilder {
             totalRows++;
             fileRowsWritten++;
 
-            if (rowCounter >= sheetCfg._maxRowsPerSheet) {
+            if (rowCounter >= sheetCfg._maxRowsPerSheet && fileRowsWritten < maxRows) {
               const nextSheetName = resolveSheetName(sheetCfg._name, sheetIndex + 1);
               const colCount      = resolvedColDefs ? resolvedColDefs.length : 1;
               worksheet.addRow(['']).commit();
@@ -1247,6 +1253,14 @@ class OracleSqlToExcelBuilder {
         rows = await resultSet!.getRows(sheetCfg._fetchSize);
       }
 
+      if (earlyReturn && nextFileNote) {
+        const colCount = resolvedColDefs ? resolvedColDefs.length : 1;
+        worksheet.addRow(['']).commit();
+        const noteRow = worksheet.addRow([nextFileNote]);
+        noteRow.font  = { italic: true, color: { argb: 'FF404040' } };
+        if (colCount > 1) worksheet.mergeCells(noteRow.number, 1, noteRow.number, colCount);
+        noteRow.commit();
+      }
       await worksheet.commit();
       return { sheetNames, skippedRows, rowsWritten: fileRowsWritten, overflowRows, openRS: earlyReturn ? resultSet! : null };
     } catch (err) {
@@ -1316,10 +1330,7 @@ class OracleSqlToExcelBuilder {
           }
         : null;
 
-      // Each file contains ALL sheets. Exhausted sheets are skipped in subsequent files.
-      // Single-sheet → row-range filename. Multi-sheet → sequential index filename.
-      const isSingleSheet = cfg._sheets.length === 1;
-      const maxRows       = cfg._maxRowsPerFile > 0 ? cfg._maxRowsPerFile : Number.MAX_SAFE_INTEGER;
+      const maxRows = cfg._maxRowsPerFile > 0 ? cfg._maxRowsPerFile : Number.MAX_SAFE_INTEGER;
       const states        = new Map<SheetConfig, SheetState>(
         cfg._sheets.map((s) => [s, { openRS: null, pending: [], done: false, globalStart: 1, globalEnd: 0 }])
       );
@@ -1336,9 +1347,12 @@ class OracleSqlToExcelBuilder {
           zip             : { zlib: { level: this._compress ? this._compressLevel : 0 } },
         } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
 
-        let fileFirstSheetStart = 0;
-        let fileFirstSheetEnd   = 0;
+        const prevNoteFile = fileIndex > 0
+          ? `Previous data on file: ${cfg._name}_${fileIndex}.xlsx`
+          : undefined;
+        const nextNoteFile = `Next data available on file: ${cfg._name}_${fileIndex + 2}.xlsx`;
 
+        let isFirstActiveSheet = true;
         for (const sheetCfg of cfg._sheets) {
           const st = states.get(sheetCfg)!;
           if (st.done) continue;
@@ -1346,14 +1360,13 @@ class OracleSqlToExcelBuilder {
           const seg = await this._executeSheetSegment(
             connection, workbook, sheetCfg, progressCtx, drainFn,
             maxRows, st.pending, st.openRS,
-            st.globalStart - 1
+            st.globalStart - 1,
+            isFirstActiveSheet ? prevNoteFile : undefined,
+            nextNoteFile
           );
+          isFirstActiveSheet = false;
 
           st.globalEnd = st.globalStart + seg.rowsWritten - 1;
-          if (isSingleSheet) {
-            fileFirstSheetStart = st.globalStart;
-            fileFirstSheetEnd   = st.globalEnd;
-          }
 
           allSheets.push(...seg.sheetNames);
           totalSkipped += seg.skippedRows;
@@ -1366,12 +1379,10 @@ class OracleSqlToExcelBuilder {
 
         await workbook.commit();
 
-        const finalFile = isSingleSheet
-          ? path.join(this._outputDir, `${cfg._name}_${fileFirstSheetStart}-${fileFirstSheetEnd}.xlsx`)
-          : path.join(this._outputDir, `${cfg._name}_${fileIndex + 1}.xlsx`);
+        const finalFile = path.join(this._outputDir, `${cfg._name}_${fileIndex + 1}.xlsx`);
 
         await fs.promises.rename(tempFile, finalFile);
-        allFiles.push({ file: finalFile, startRow: fileFirstSheetStart, endRow: fileFirstSheetEnd });
+        allFiles.push({ file: finalFile });
 
         fileIndex++;
       }
@@ -1479,6 +1490,12 @@ class OracleSqlToExcelBuilder {
               zip             : { zlib: { level: this._compress ? this._compressLevel : 0 } },
             } as unknown as ExcelJS.stream.xlsx.WorkbookWriterOptions);
 
+            const prevNote = fileIndex > 0
+              ? `Previous data on file: ${fileCfg._name}_${fileIndex}.xlsx`
+              : undefined;
+            const nextNote = `Next data available on file: ${fileCfg._name}_${fileIndex + 2}.xlsx`;
+
+            let isFirstActiveSheet = true;
             for (const sheetCfg of fileCfg._sheets) {
               const st = states.get(sheetCfg)!;
               if (st.done) continue;
@@ -1486,8 +1503,11 @@ class OracleSqlToExcelBuilder {
               const seg = await this._executeSheetSegment(
                 connection, workbook, sheetCfg, progressCtx, drainFn,
                 maxRows, st.pending, st.openRS,
-                st.globalStart - 1
+                st.globalStart - 1,
+                isFirstActiveSheet ? prevNote : undefined,
+                nextNote
               );
+              isFirstActiveSheet = false;
 
               st.globalEnd   = st.globalStart + seg.rowsWritten - 1;
               allSheets.push(...seg.sheetNames);

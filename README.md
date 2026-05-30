@@ -236,8 +236,8 @@ For CSV, only `key` and `header` are used.
 {
   success     : true,
   files       : [
-    { file: '/output/data_1-1000000.xlsx', startRow: 1,       endRow: 1000000 },
-    { file: '/output/data_1000001-1823400.xlsx', startRow: 1000001, endRow: 1823400 },
+    { file: '/output/data_1.xlsx' },
+    { file: '/output/data_2.xlsx' },
   ],
   sheets      : ['Data', 'Data 2'],
   skippedRows : 0,
@@ -408,11 +408,19 @@ const { files } = await OracleSqlToExcel()
   .run();
 
 // files → [
-//   { file: '/var/reports/transactions_1-1000000.xlsx',    startRow: 1,       endRow: 1000000 },
-//   { file: '/var/reports/transactions_1000001-1823400.xlsx', startRow: 1000001, endRow: 1823400 },
+//   { file: '/var/reports/transactions_1.xlsx' },
+//   { file: '/var/reports/transactions_2.xlsx' },
 // ]
-console.log(`${files.length} files, last row: ${files[files.length - 1].endRow}`);
+console.log(`${files.length} file(s) written`);
 ```
+
+> **Cross-file navigation notes** — when a query spans multiple files, the library automatically inserts informational rows at file boundaries so the reader knows where data continues:
+> - **Start of file 2+** (after column headers): `"Previous data on file: transactions_1.xlsx"` — italic, gray
+> - **End of files 1 to N-1** (after last data row): `"Next data available on file: transactions_2.xlsx"` — italic, gray
+>
+> These use the same visual style as the within-file sheet continuation notes (`"Continued on sheet: …"`).
+
+> **`maxRowsPerSheet` and `maxRowsPerFile` interaction** — if `maxRowsPerSheet` is set larger than `maxRowsPerFile`, it is automatically capped at the file limit. Each file segment will never split into more sheets than needed.
 
 Multiple `.file()` calls produce independent output files:
 

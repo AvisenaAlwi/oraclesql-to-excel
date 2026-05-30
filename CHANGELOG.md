@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **File naming simplified to `{name}_{part}.xlsx`** — `.run()` without `.asZip()` (`MultiRunResult`) now uses sequential numbering (`data_1.xlsx`, `data_2.xlsx`) instead of row-range naming (`data_1-1000000.xlsx`). ZIP entries (`.asZip()`) were already using sequential naming. `MultiRunResult.files[].startRow` and `.endRow` are now always `0` (field retained for backwards-compatibility).
+- **File naming simplified to `{name}_{part}.xlsx`** — `.run()` without `.asZip()` (`MultiRunResult`) now uses sequential numbering (`data_1.xlsx`, `data_2.xlsx`) instead of row-range naming (`data_1-1000000.xlsx`). ZIP entries (`.asZip()`) were already using sequential naming.
+- **`FileSegment.startRow` and `.endRow` removed** — these fields were always `0` after the naming simplification and were ambiguous for multi-sheet files (different sheets have different row ranges). `FileSegment` now contains only `{ file: string }`. TypeScript callers referencing these fields must update their code.
 
 ---
 
