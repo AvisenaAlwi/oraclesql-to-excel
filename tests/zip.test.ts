@@ -131,10 +131,59 @@ describe('toBuffer() + asZip()', () => {
     const entries = readZipBuffer(buffer);
 
     const [sheet1] = await readBuffer(entries[0].data, 'Data');
-    expect(sheet1.rows).toHaveLength(3); // rows 1-3
+    expect(sheet1.rows).toHaveLength(5); // 3 data rows + empty row + next-file note
+    expect(sheet1.rows[0][0]).toBe(1);
+    expect(sheet1.rows[2][0]).toBe(3);
 
     const [sheet2] = await readBuffer(entries[1].data, 'Data');
-    expect(sheet2.rows).toHaveLength(2); // rows 4-5
+    expect(sheet2.rows).toHaveLength(3); // prev-file note + 2 data rows
+    expect(sheet2.rows[1][0]).toBe(4); // data starts at index 1 (after note)
+    expect(sheet2.rows[2][0]).toBe(5);
+  });
+
+  it('cross-file notes contain correct filenames', async () => {
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('rep', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .toBuffer();
+
+    const entries = readZipBuffer(buffer);
+    const [sheet1] = await readBuffer(entries[0].data, 'Data');
+    const [sheet2] = await readBuffer(entries[1].data, 'Data');
+
+    // last row of file 1 = "Next data available on file: rep_2.xlsx"
+    const nextNote = String(sheet1.rows[sheet1.rows.length - 1][0] ?? '');
+    expect(nextNote).toContain('rep_2.xlsx');
+
+    // first row of file 2 = "Previous data on file: rep_1.xlsx"
+    const prevNote = String(sheet2.rows[0][0] ?? '');
+    expect(prevNote).toContain('rep_1.xlsx');
+  });
+
+  it('maxRowsPerSheet larger than maxRowsPerFile does not create empty split sheets', async () => {
+    // maxRowsPerSheet=1_000_000 (default) >> maxRowsPerFile=3 — sheet should NOT split
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(factory)
+      .file('rep', (f) => f
+        .maxRowsPerFile(3)
+        .sheet('Data', (s) => s.sql('SELECT * FROM T').columns(COLS))
+      )
+      .asZip()
+      .toBuffer();
+
+    const entries = readZipBuffer(buffer);
+    expect(entries).toHaveLength(2);
+
+    // each entry should have exactly 1 worksheet named 'Data'
+    const [file1Sheet] = await readBuffer(entries[0].data, 'Data');
+    expect(file1Sheet).toBeDefined(); // 'Data' sheet exists
+    // no 'Data (Sheet 2)' within file 1
+    const file1AllSheets = await readBuffer(entries[0].data);
+    expect(file1AllSheets).toHaveLength(1);
   });
 
   it('returns success=false when connectionFactory fails', async () => {
@@ -276,12 +325,14 @@ describe('run() + asZip()', () => {
     const entries   = readZipBuffer(zipBuffer);
 
     const [s1] = await readBuffer(entries[0].data, 'Sheet1');
-    expect(s1.rows).toHaveLength(3);
+    expect(s1.rows).toHaveLength(5); // 3 data rows + empty row + next-file note
     expect(s1.rows[0][0]).toBe(1);
+    expect(s1.rows[2][0]).toBe(3);
 
     const [s2] = await readBuffer(entries[1].data, 'Sheet1');
-    expect(s2.rows).toHaveLength(2);
-    expect(s2.rows[0][0]).toBe(4);
+    expect(s2.rows).toHaveLength(3); // prev-file note + 2 data rows
+    expect(s2.rows[1][0]).toBe(4); // data starts at index 1 (after note)
+    expect(s2.rows[2][0]).toBe(5);
 
     fs.rmSync(tmpDir, { recursive: true });
   });
@@ -315,7 +366,8 @@ describe('run() + asZip()', () => {
 
     expect(result.success).toBe(true);
     expect(result.files).toHaveLength(2); // MultiRunResult, not ZipRunResult
-    expect(result.files[0].file).toMatch(/\.xlsx$/);
+    expect(result.files[0].file).toMatch(/data_1\.xlsx$/);
+    expect(result.files[1].file).toMatch(/data_2\.xlsx$/);
 
     fs.rmSync(tmpDir, { recursive: true });
   });

@@ -113,9 +113,20 @@ export interface Result {
   error?      : string;
 }
 
+export interface FileSheetInfo {
+  /** Sheet name as it appears in the workbook (e.g. `"Data"`, `"Data (Sheet 2)"`). */
+  name    : string;
+  /** First data row of this query's data written to this file (1-based, global across all files). */
+  startRow: number;
+  /** Last data row of this query's data written to this file (inclusive). */
+  endRow  : number;
+}
+
 export interface FileSegment {
   /** Absolute path to this file. */
-  file: string;
+  file  : string;
+  /** Per-query row range info for each sheet written to this file. */
+  sheets: FileSheetInfo[];
 }
 
 export interface RunResult extends Result {
@@ -1352,10 +1363,13 @@ class OracleSqlToExcelBuilder {
           : undefined;
         const nextNoteFile = `Next data available on file: ${cfg._name}_${fileIndex + 2}.xlsx`;
 
-        let isFirstActiveSheet = true;
+        const fileSheetInfos  : FileSheetInfo[] = [];
+        let   isFirstActiveSheet = true;
         for (const sheetCfg of cfg._sheets) {
           const st = states.get(sheetCfg)!;
           if (st.done) continue;
+
+          const fileStartRow = st.globalStart;
 
           const seg = await this._executeSheetSegment(
             connection, workbook, sheetCfg, progressCtx, drainFn,
@@ -1367,6 +1381,11 @@ class OracleSqlToExcelBuilder {
           isFirstActiveSheet = false;
 
           st.globalEnd = st.globalStart + seg.rowsWritten - 1;
+
+          if (seg.rowsWritten > 0) {
+            const label = Array.isArray(sheetCfg._name) ? sheetCfg._name[0] : sheetCfg._name;
+            fileSheetInfos.push({ name: label, startRow: fileStartRow, endRow: st.globalEnd });
+          }
 
           allSheets.push(...seg.sheetNames);
           totalSkipped += seg.skippedRows;
@@ -1382,7 +1401,7 @@ class OracleSqlToExcelBuilder {
         const finalFile = path.join(this._outputDir, `${cfg._name}_${fileIndex + 1}.xlsx`);
 
         await fs.promises.rename(tempFile, finalFile);
-        allFiles.push({ file: finalFile });
+        allFiles.push({ file: finalFile, sheets: fileSheetInfos });
 
         fileIndex++;
       }

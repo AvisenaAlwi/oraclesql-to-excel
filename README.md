@@ -236,10 +236,15 @@ For CSV, only `key` and `header` are used.
 {
   success     : true,
   files       : [
-    { file: '/output/data_1.xlsx' },
-    { file: '/output/data_2.xlsx' },
+    {
+      file  : '/output/data_1.xlsx',
+      sheets: [{ name: 'Data', startRow: 1, endRow: 1000000 }],
+    },
+    {
+      file  : '/output/data_2.xlsx',
+      sheets: [{ name: 'Data', startRow: 1000001, endRow: 1823400 }],
+    },
   ],
-  sheets      : ['Data', 'Data 2'],
   skippedRows : 0,
   error       : undefined,
 }
