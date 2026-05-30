@@ -1306,10 +1306,12 @@ class OracleSqlToExcelBuilder {
       const drainFn: (() => Promise<void>) | null = rssThreshold > 0
         ? async () => {
             if (process.memoryUsage().rss <= rssThreshold) return;
-            const started = Date.now();
+            const rssAtStart = process.memoryUsage().rss;
+            const started    = Date.now();
             while (process.memoryUsage().rss > rssThreshold) {
-              if (Date.now() - started > 10_000) break;
+              if (Date.now() - started > 3_000) break;
               await new Promise<void>(r => setTimeout(r, 200));
+              if (Date.now() - started >= 1_000 && process.memoryUsage().rss > rssAtStart - 10 * 1024 * 1024) break;
             }
           }
         : null;
@@ -1663,10 +1665,12 @@ class OracleSqlToExcelBuilder {
           // Data still accumulates in Node.js's outputData buffer, growing process RSS.
           // Polling RSS directly works regardless of proxy topology.
           if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
-          const started = Date.now();
+          const rssAtStart = process.memoryUsage().rss;
+          const started    = Date.now();
           while (process.memoryUsage().rss > rssThreshold && !streamAborted) {
-            if (Date.now() - started > 10_000) break;
+            if (Date.now() - started > 3_000) break;
             await new Promise<void>(r => setTimeout(r, 200));
+            if (Date.now() - started >= 1_000 && process.memoryUsage().rss > rssAtStart - 10 * 1024 * 1024) break;
           }
           if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
         };
@@ -1678,10 +1682,12 @@ class OracleSqlToExcelBuilder {
         const rssThreshold = this._backpressureThreshold;
         drainFn = async () => {
           if (process.memoryUsage().rss <= rssThreshold) return;
-          const started = Date.now();
+          const rssAtStart = process.memoryUsage().rss;
+          const started    = Date.now();
           while (process.memoryUsage().rss > rssThreshold) {
-            if (Date.now() - started > 10_000) break;
+            if (Date.now() - started > 3_000) break;
             await new Promise<void>(r => setTimeout(r, 200));
+            if (Date.now() - started >= 1_000 && process.memoryUsage().rss > rssAtStart - 10 * 1024 * 1024) break;
           }
         };
       }
@@ -1735,10 +1741,12 @@ class OracleSqlToExcelBuilder {
       const drainFn: (() => Promise<void>) | null = rssThreshold > 0
         ? async () => {
             if (process.memoryUsage().rss <= rssThreshold) return;
-            const started = Date.now();
+            const rssAtStart = process.memoryUsage().rss;
+            const started    = Date.now();
             while (process.memoryUsage().rss > rssThreshold) {
-              if (Date.now() - started > 10_000) break;
+              if (Date.now() - started > 3_000) break;
               await new Promise<void>((r) => setTimeout(r, 200));
+              if (Date.now() - started >= 1_000 && process.memoryUsage().rss > rssAtStart - 10 * 1024 * 1024) break;
             }
           }
         : null;
@@ -1803,10 +1811,12 @@ class OracleSqlToExcelBuilder {
       const drainFn = async (): Promise<void> => {
         if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
         if (rssThreshold <= 0 || process.memoryUsage().rss <= rssThreshold) return;
-        const started = Date.now();
+        const rssAtStart = process.memoryUsage().rss;
+        const started    = Date.now();
         while (process.memoryUsage().rss > rssThreshold && !streamAborted) {
-          if (Date.now() - started > 10_000) break;
+          if (Date.now() - started > 3_000) break;
           await new Promise<void>((r) => setTimeout(r, 200));
+          if (Date.now() - started >= 1_000 && process.memoryUsage().rss > rssAtStart - 10 * 1024 * 1024) break;
         }
         if (streamAborted) throw new Error('Client disconnected — output stream closed mid-export');
       };

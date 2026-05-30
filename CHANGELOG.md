@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.3] - 2026-05-30
+
+### Changed
+
+- **`archiver` upgraded from `^5.3.2` to `^7.0.1`** — removes transitive `glob@7` (security warnings) and `inflight@1.0.6` (memory-leak warning) from the dependency tree. API is fully compatible; no changes required in consuming code.
+- **Backpressure RSS wait: early exit + shorter max timeout** — RSS polling now exits early (~1 s) when RSS is not improving (typical behind a buffering proxy where Buffer pool retention prevents RSS from dropping). Max safety-net timeout reduced from 10 s → 3 s for cases where RSS is actively dropping (V8 GC). In proxy-buffering deployments this eliminates the ~10 s stall per batch that previously wasted time with no memory benefit.
+
+---
+
+## [2.0.2] - 2026-05-29
+
+### Fixed
+
+- **Client disconnect not detected in `pipe()` + `.asZip()` path** — when the HTTP connection was dropped mid-export (browser cancel, ingress timeout), the Oracle fetch loop continued until the next RSS timeout expired. Fixed by adding `close`/`error` listeners on the writable stream in both `pipe()` and `_executeAsZip()`. Export now stops within one batch of disconnect.
+- **Backpressure wait timeout reduced 30 s → 10 s** — GC typically recovers in 1–5 s; 30 s was unnecessarily long.
+
+---
+
 ## [2.0.1] - 2026-05-29
 
 ### Fixed
