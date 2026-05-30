@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.5] - 2026-05-30
+
+### Fixed
+
+- **`prevFileNote` ("Previous data on file: …") now appears above "Showing rows…" and the column header** — in v2.0.4 the note was inserted *after* the column header row, placing it between the header and the first data row. It now appears before the "Showing rows X – Y of Z total" summary line and before the column header row, matching the expected visual order at the top of each file's first sheet.
+
+---
+
 ## [2.0.4] - 2026-05-30
 
 ### Added
