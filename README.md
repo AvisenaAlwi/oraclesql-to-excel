@@ -1,4 +1,4 @@
-# @avisenaalwi/oraclesql-to-excel
+# oraclesql-to-excel JS
 
 Stream Oracle SQL query results directly into Excel (`.xlsx`) or CSV files with a fluent, chainable API. Built for exports with millions of rows — memory stays bounded regardless of result set size.
 
