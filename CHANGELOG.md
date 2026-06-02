@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.7] - 2026-06-02
+
+### Fixed
+
+- **`OracleSqlToCsv().pipe()` left the response stream open after export completed** — the writable stream was never ended on the success path, causing HTTP clients to hang indefinitely waiting for more data even though all rows had been written. The error path already called `stream.end()`, but the normal completion path did not. Fixed by calling `stream.end()` after `_execute()` resolves, matching the behaviour of `.run()` and `.toBuffer()`.
+
+---
+
+## [2.0.6] - 2026-06-02
+
+### Fixed
+
+- **`freezeHeader` threw "Cannot set property views of #\<WorksheetWriter\> which has only a getter"** — `ExcelJS.stream.xlsx.WorkbookWriter.addWorksheet()` returns a `WorksheetWriter` whose `views` property is exposed as a getter with no setter. Assigning `worksheet.views = [...]` fails at runtime even though TypeScript allows it (the internal `StreamWorksheet` alias pointed to the non-streaming `Worksheet` type which does have a setter). Fixed by mutating the existing array in place via `splice()` instead of reassigning. Affects both the single-sheet (`_executeSheet`) and multi-segment (`_executeSheetSegment`) code paths whenever `.freezeHeader(true)` is set.
+
+---
+
 ## [2.0.5] - 2026-05-30
 
 ### Fixed
