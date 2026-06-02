@@ -960,7 +960,7 @@ class OracleSqlToExcelBuilder {
         dbg(`  headerRowNum=${headerRowNum}`);
 
         if (sheetCfg._freezeHeader) {
-          worksheet.views = [{ state: 'frozen', ySplit: headerRowNum }];
+          worksheet.views.splice(0, worksheet.views.length, { state: 'frozen', ySplit: headerRowNum });
           dbg(`  freezeHeader ySplit=${headerRowNum}`);
         }
         if (sheetCfg._autoFilter) {
@@ -1178,7 +1178,7 @@ class OracleSqlToExcelBuilder {
       }
       if (resolvedColDefs) {
         const headerRowNum = prependedRows + 1;
-        if (sheetCfg._freezeHeader) worksheet.views = [{ state: 'frozen', ySplit: headerRowNum }];
+        if (sheetCfg._freezeHeader) worksheet.views.splice(0, worksheet.views.length, { state: 'frozen', ySplit: headerRowNum });
         if (sheetCfg._autoFilter) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (worksheet as any).autoFilter = { from: { row: headerRowNum, column: 1 }, to: { row: headerRowNum, column: resolvedColDefs.length } };
