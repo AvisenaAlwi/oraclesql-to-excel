@@ -2172,7 +2172,9 @@ class OracleSqlToCsvBuilder {
    * await OracleSqlToCsv().connectionFactory(...).sql(SQL).pipe(res);
    */
   async pipe(writableStream: Writable): Promise<CsvResult> {
-    return this._execute(writableStream);
+    const result = await this._execute(writableStream);
+    if (!writableStream.writableEnded) writableStream.end();
+    return result;
   }
 
   /**
