@@ -1945,6 +1945,11 @@ export interface CsvBufferResult extends CsvResult {
   buffer: Buffer;
 }
 
+export interface CsvMultiRunResult extends CsvResult {
+  /** Absolute paths to all written CSV files, in order. */
+  files: string[];
+}
+
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
 /** @private */
@@ -1993,6 +1998,11 @@ class OracleSqlToCsvBuilder {
   /** @private */ _separator         : string;
   /** @private */ _withBom           : boolean;
   /** @private */ _onProgressCb      : ((info: { rowsWritten: number }) => void) | null;
+  /** @private */ _maxRowsPerFile    : number;
+  /** @private */ _asZip             : boolean;
+  /** @private */ _compress          : boolean;
+  /** @private */ _compressLevel     : number;
+  /** @private */ _filePrefix        : string;
 
   constructor() {
     this._connectionFactory = null;
@@ -2004,6 +2014,11 @@ class OracleSqlToCsvBuilder {
     this._separator         = ',';
     this._withBom           = true;
     this._onProgressCb      = null;
+    this._maxRowsPerFile    = 0;
+    this._asZip             = false;
+    this._compress          = false;
+    this._compressLevel     = 1;
+    this._filePrefix        = 'export';
   }
 
   /**
@@ -2057,6 +2072,46 @@ class OracleSqlToCsvBuilder {
    */
   onProgress(cb: (info: { rowsWritten: number }) => void): this { this._onProgressCb = cb; return this; }
 
+  /**
+   * Split output into multiple CSV files when row count exceeds `value`.
+   * - `.run(filepath)` produces `<base>_1.csv`, `<base>_2.csv`, … on disk.
+   * - `.pipe()` / `.toBuffer()` require `.asZip()` — files become ZIP entries `<prefix>_1.csv`, …
+   * @param value - Row limit per file. `0` (default) = no split.
+   */
+  maxRowsPerFile(value: number): this { this._maxRowsPerFile = value; return this; }
+
+  /**
+   * Bundle all output into a single ZIP archive.
+   * - `.run(filepath)` → writes `filepath` as a ZIP.
+   * - `.pipe(stream)`  → streams a ZIP to the writable.
+   * - `.toBuffer()`    → returns ZIP as a `Buffer`.
+   *
+   * Combine with `.maxRowsPerFile()` to produce multiple CSV entries inside the ZIP.
+   * @param value - Default `true` when called without argument.
+   */
+  asZip(value = true): this { this._asZip = value; return this; }
+
+  /**
+   * ZIP compression level. Only applies when `.asZip()` is used.
+   * @param value - Enable compression. Default when called without argument: `true`.
+   * @param level - zlib level `0`–`9` (0 = store, 1 = fastest, 9 = best). Default: `1`.
+   */
+  compress(value = true, level = 1): this {
+    if (!Number.isInteger(level) || level < 0 || level > 9) {
+      throw new RangeError(`compress() level must be an integer between 0 and 9, got: ${level}`);
+    }
+    this._compress      = value;
+    this._compressLevel = level;
+    return this;
+  }
+
+  /**
+   * Base name used for CSV entry filenames inside a ZIP when calling `.pipe()` or `.toBuffer()`.
+   * Ignored for `.run()`, which derives the name from the output filepath.
+   * @param value - Default: `'export'` → entries named `export.csv` / `export_1.csv`, `export_2.csv`, …
+   */
+  filePrefix(value: string): this { this._filePrefix = value; return this; }
+
   // ── Internal ────────────────────────────────────────────────────────────────
 
   /** @private */
@@ -2064,8 +2119,6 @@ class OracleSqlToCsvBuilder {
     let connection : OracleConnection | null = null;
     let resultSet  : OracleResultSet  | null = null;
     let rowsWritten = 0;
-
-    const write = (data: string): void => { stream.write(data); };
 
     try {
       if (!this._connectionFactory) throw new Error('No connection factory set.');
@@ -2083,50 +2136,53 @@ class OracleSqlToCsvBuilder {
 
       resultSet = execResult.resultSet ?? null;
 
-      // Resolve columns: explicit definition or Oracle metadata
-      let cols = this._columns.length > 0
-        ? this._columns
-        : (execResult.metaData ?? []).map((m) => ({ key: m.name, header: m.name }));
+      // Resolve columns: explicit → metadata → first-row sniff
+      let cols: Pick<ColumnDef, 'key' | 'header'>[];
+      let prefetchedRows: Record<string, unknown>[] = [];
 
-      if (cols.length === 0) {
-        // No metadata available — will resolve from first row
-        let rows = await resultSet!.getRows(1);
-        if (rows.length > 0) {
-          cols = Object.keys(rows[0]).map((k) => ({ key: k, header: k }));
-          // Write BOM + header before processing this pre-fetched row
-          if (this._withBom) write('﻿');
-          write(cols.map((c) => escapeCsvField(c.header ?? c.key, this._separator)).join(this._separator) + '\n');
-          for (const row of rows) {
-            write(cols.map((c) => escapeCsvField(String(row[c.key] ?? ''), this._separator)).join(this._separator) + '\n');
-            rowsWritten++;
-          }
-          if (this._onProgressCb) this._onProgressCb({ rowsWritten });
-          rows = await resultSet!.getRows(this._fetchSize);
-          while (rows.length > 0) {
-            const lines = rows.map((row) =>
-              cols.map((c) => escapeCsvField(String(row[c.key] ?? ''), this._separator)).join(this._separator) + '\n'
-            ).join('');
-            write(lines);
-            rowsWritten += rows.length;
-            if (this._onProgressCb) this._onProgressCb({ rowsWritten });
-            rows = await resultSet!.getRows(this._fetchSize);
-          }
-          return { success: true, rowsWritten };
-        }
-        return { success: true, rowsWritten: 0 };
+      if (this._columns.length > 0) {
+        cols = this._columns;
+      } else if (execResult.metaData?.length) {
+        cols = execResult.metaData.map((m) => ({ key: m.name, header: m.name }));
+      } else {
+        const firstRows = await resultSet!.getRows(1);
+        if (firstRows.length === 0) return { success: true, rowsWritten: 0 };
+        cols           = Object.keys(firstRows[0]).map((k) => ({ key: k, header: k }));
+        prefetchedRows = firstRows;
       }
 
       // Write BOM + header
-      if (this._withBom) write('﻿');
-      write(cols.map((c) => escapeCsvField(c.header ?? c.key, this._separator)).join(this._separator) + '\n');
+      if (this._withBom) stream.write('﻿');
+      stream.write(cols.map((c) => escapeCsvField(c.header ?? c.key, this._separator)).join(this._separator) + '\n');
 
-      // Stream rows batch by batch — no intermediate accumulation
+      // Pre-compute separator and key array once — avoids repeated property lookups in the hot loop
+      const sep  = this._separator;
+      const keys = cols.map((c) => c.key);
+      const n    = keys.length;
+
+      // Build one string per batch via direct concatenation — avoids per-row array allocation
+      // that cols.map(...).join() would produce (N×M intermediate arrays per batch).
+      const writeRows = (rows: Record<string, unknown>[]): void => {
+        let out = '';
+        for (const row of rows) {
+          for (let i = 0; i < n; i++) {
+            if (i > 0) out += sep;
+            out += escapeCsvField(String(row[keys[i]] ?? ''), sep);
+          }
+          out += '\n';
+        }
+        stream.write(out);
+      };
+
+      if (prefetchedRows.length > 0) {
+        writeRows(prefetchedRows);
+        rowsWritten += prefetchedRows.length;
+        if (this._onProgressCb) this._onProgressCb({ rowsWritten });
+      }
+
       let rows = await resultSet!.getRows(this._fetchSize);
       while (rows.length > 0) {
-        const lines = rows.map((row) =>
-          cols.map((c) => escapeCsvField(String(row[c.key] ?? ''), this._separator)).join(this._separator) + '\n'
-        ).join('');
-        write(lines);
+        writeRows(rows);
         rowsWritten += rows.length;
         if (this._onProgressCb) this._onProgressCb({ rowsWritten });
         rows = await resultSet!.getRows(this._fetchSize);
@@ -2144,18 +2200,190 @@ class OracleSqlToCsvBuilder {
     }
   }
 
+  /**
+   * Core multi-file/zip execution. `getStream(fileIndex)` returns a writable stream for each
+   * file segment and a `finalize()` callback awaited when that segment is complete.
+   * Columns and the Oracle connection are opened once and reused across all segments.
+   * @private
+   */
+  async _executeWithSplit(
+    getStream: (fileIndex: number) => Promise<{ stream: Writable; finalize: () => Promise<void> }>
+  ): Promise<{ success: boolean; rowsWritten: number; fileCount: number; error?: string }> {
+    let connection  : OracleConnection | null = null;
+    let resultSet   : OracleResultSet  | null = null;
+    let rowsWritten = 0;
+    let fileCount   = 0;
+
+    try {
+      if (!this._connectionFactory) throw new Error('No connection factory set.');
+      if (!this._sql?.trim())        throw new Error('No SQL query set.');
+
+      connection = await this._connectionFactory();
+      const execResult = await connection.execute(this._sql, this._param, {
+        autoCommit    : true,
+        ...this._executeOptions,
+        outFormat     : OUT_FORMAT_OBJECT,
+        resultSet     : true,
+        fetchArraySize: this._fetchSize,
+      });
+
+      resultSet = execResult.resultSet ?? null;
+
+      // Resolve columns once — reused for every file segment
+      let cols: Pick<ColumnDef, 'key' | 'header'>[];
+      let carry: Record<string, unknown>[] = [];
+
+      if (this._columns.length > 0) {
+        cols = this._columns;
+      } else if (execResult.metaData?.length) {
+        cols = execResult.metaData.map((m) => ({ key: m.name, header: m.name }));
+      } else {
+        const peek = await resultSet!.getRows(1);
+        if (peek.length === 0) {
+          const { stream, finalize } = await getStream(fileCount++);
+          if (this._withBom) stream.write('﻿');
+          await finalize();
+          return { success: true, rowsWritten: 0, fileCount };
+        }
+        cols  = Object.keys(peek[0]).map((k) => ({ key: k, header: k }));
+        carry = peek;
+      }
+
+      const sep        = this._separator;
+      const keys       = cols.map((c) => c.key);
+      const n          = keys.length;
+      const maxRows    = this._maxRowsPerFile > 0 ? this._maxRowsPerFile : Number.MAX_SAFE_INTEGER;
+      const headerLine = cols.map((c) => escapeCsvField(c.header ?? c.key, sep)).join(sep) + '\n';
+
+      // Each outer-loop iteration writes one file segment
+      outer: while (true) {
+        const { stream, finalize } = await getStream(fileCount++);
+        if (this._withBom) stream.write('﻿');
+        stream.write(headerLine);
+
+        let fileRows = 0;
+        let batch    = carry.length > 0 ? carry : await resultSet!.getRows(this._fetchSize);
+        carry        = [];
+
+        while (batch.length > 0) {
+          let out   = '';
+          let limit = false;
+
+          for (let i = 0; i < batch.length; i++) {
+            if (fileRows >= maxRows) {
+              carry = batch.slice(i);  // carry remaining rows to next file
+              limit = true;
+              break;
+            }
+            const row = batch[i];
+            for (let c = 0; c < n; c++) {
+              if (c > 0) out += sep;
+              out += escapeCsvField(String(row[keys[c]] ?? ''), sep);
+            }
+            out += '\n';
+            fileRows++;
+            rowsWritten++;
+          }
+
+          if (out) stream.write(out);
+          if (this._onProgressCb) this._onProgressCb({ rowsWritten });
+
+          if (limit) {
+            await finalize();
+            continue outer;  // start the next file segment
+          }
+
+          batch = await resultSet!.getRows(this._fetchSize);
+        }
+
+        await finalize();
+        break;  // result set exhausted
+      }
+
+      return { success: true, rowsWritten, fileCount };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[OracleSqlToCsv:ERROR] ${msg}`);
+      return { success: false, rowsWritten, fileCount, error: msg };
+    } finally {
+      if (resultSet)  await resultSet.close().catch(() => {});
+      if (connection) await connection.close().catch(() => {});
+    }
+  }
+
   // ── Terminal methods ───────────────────────────────────────────────────────
 
   /**
    * Write CSV to a file at `filepath`.
    * @param filepath - Absolute or relative path including filename and extension (e.g. `'/tmp/report.csv'`).
    */
-  async run(filepath: string): Promise<CsvRunResult> {
+  async run(filepath: string): Promise<CsvRunResult | CsvMultiRunResult> {
+    // ── ZIP mode ─────────────────────────────────────────────────────────────
+    if (this._asZip) {
+      const ws         = fs.createWriteStream(filepath);
+      const wsDone     = new Promise<void>((resolve, reject) => { ws.on('finish', resolve); ws.on('error', reject); });
+      const archive    = archiver('zip', { zlib: { level: this._compress ? this._compressLevel : 0 } });
+      let archiveError : string | null = null;
+      archive.on('error', (err: Error) => { archiveError = err.message; });
+      archive.pipe(ws);
+
+      const prefix = path.basename(filepath, path.extname(filepath));
+      const result = await this._executeWithSplit(async (i) => {
+        if (archiveError) throw new Error(archiveError);
+        const name = this._maxRowsPerFile > 0 ? `${prefix}_${i + 1}.csv` : `${prefix}.csv`;
+        const pass = new PassThrough();
+        archive.append(pass, { name });
+        return { stream: pass, finalize: async () => { pass.end(); } };
+      });
+
+      if (!result.success || archiveError) {
+        try { archive.abort(); } catch (_) {}
+        await wsDone.catch(() => {});
+        fs.promises.unlink(filepath).catch(() => {});
+        return { success: false, rowsWritten: result.rowsWritten, error: result.error ?? archiveError ?? undefined, file: filepath };
+      }
+
+      const finalizeP = new Promise<void>((resolve, reject) => {
+        archive.on('finish', resolve);
+        archive.on('error', (err: Error) => { archiveError = err.message; reject(err); });
+      });
+      archive.finalize();
+      await finalizeP.catch(() => {});
+      await wsDone.catch(() => {});
+
+      if (archiveError) {
+        fs.promises.unlink(filepath).catch(() => {});
+        return { success: false, rowsWritten: result.rowsWritten, error: archiveError, file: filepath };
+      }
+      return { success: true, rowsWritten: result.rowsWritten, file: filepath };
+    }
+
+    // ── Multi-file mode ───────────────────────────────────────────────────────
+    if (this._maxRowsPerFile > 0) {
+      const ext   = path.extname(filepath);
+      const base  = ext ? filepath.slice(0, -ext.length) : filepath;
+      const files : string[] = [];
+
+      const result = await this._executeWithSplit(async (i) => {
+        const filePath = `${base}_${i + 1}${ext || '.csv'}`;
+        files.push(filePath);
+        const ws   = fs.createWriteStream(filePath);
+        const done = new Promise<void>((resolve, reject) => { ws.on('finish', resolve); ws.on('error', reject); });
+        return {
+          stream  : ws,
+          finalize: async () => { if (!ws.writableEnded) ws.end(); await done.catch(() => {}); },
+        };
+      });
+
+      if (!result.success) {
+        for (const f of files) fs.promises.unlink(f).catch(() => {});
+      }
+      return { success: result.success, rowsWritten: result.rowsWritten, error: result.error, files };
+    }
+
+    // ── Single-file mode ──────────────────────────────────────────────────────
     const stream = fs.createWriteStream(filepath);
-    const done   = new Promise<void>((resolve, reject) => {
-      stream.on('finish', resolve);
-      stream.on('error', reject);
-    });
+    const done   = new Promise<void>((resolve, reject) => { stream.on('finish', resolve); stream.on('error', reject); });
     const result = await this._execute(stream);
     if (!stream.writableEnded) stream.end();
     await done.catch(() => {});
@@ -2165,6 +2393,8 @@ class OracleSqlToCsvBuilder {
 
   /**
    * Stream CSV directly to any Writable (e.g. Express `res`).
+   * When `.asZip()` is set, streams a ZIP archive instead of raw CSV.
+   * `.maxRowsPerFile()` requires `.asZip()` when piping.
    *
    * @example
    * res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -2172,23 +2402,114 @@ class OracleSqlToCsvBuilder {
    * await OracleSqlToCsv().connectionFactory(...).sql(SQL).pipe(res);
    */
   async pipe(writableStream: Writable): Promise<CsvResult> {
+    if (this._maxRowsPerFile > 0 && !this._asZip) {
+      throw new Error(
+        '.pipe() with .maxRowsPerFile() requires .asZip().\n' +
+        'Call .asZip() so all CSV files are streamed as a single ZIP.\n' +
+        'Remember to set Content-Type: application/zip and Content-Disposition: attachment; filename="export.zip".'
+      );
+    }
+
+    if (this._asZip) {
+      const archive    = archiver('zip', { zlib: { level: this._compress ? this._compressLevel : 0 } });
+      let archiveError : string | null = null;
+      let streamDone                   = false;
+      archive.on('error', (err: Error) => { archiveError = err.message; });
+      writableStream.on('close', () => { streamDone = true; });
+      writableStream.on('error', () => { streamDone = true; });
+      archive.pipe(writableStream);
+
+      const prefix = this._filePrefix;
+      const result = await this._executeWithSplit(async (i) => {
+        if (archiveError) throw new Error(archiveError);
+        if (streamDone) throw new Error('Client disconnected — output stream closed mid-export');
+        const name = this._maxRowsPerFile > 0 ? `${prefix}_${i + 1}.csv` : `${prefix}.csv`;
+        const pass = new PassThrough();
+        archive.append(pass, { name });
+        return { stream: pass, finalize: async () => { pass.end(); } };
+      });
+
+      if (!result.success || archiveError) {
+        try { archive.abort(); } catch (_) {}
+        if (!writableStream.writableEnded) try { writableStream.end(); } catch (_) {}
+        return { success: false, rowsWritten: result.rowsWritten, error: result.error ?? archiveError ?? undefined };
+      }
+
+      const finalizeP = new Promise<void>((resolve, reject) => {
+        archive.on('finish', resolve);
+        archive.on('error', (err: Error) => { archiveError = err.message; reject(err); });
+      });
+      archive.finalize();
+      await finalizeP.catch(() => {});
+
+      if (archiveError) {
+        if (!writableStream.writableEnded) try { writableStream.end(); } catch (_) {}
+        return { success: false, rowsWritten: result.rowsWritten, error: archiveError };
+      }
+      return { success: true, rowsWritten: result.rowsWritten };
+    }
+
     const result = await this._execute(writableStream);
     if (!writableStream.writableEnded) writableStream.end();
     return result;
   }
 
   /**
-   * Return the entire CSV as an in-memory `Buffer`.
-   * For large datasets prefer `.run()` or `.pipe()` to avoid holding all data in memory.
+   * Return the entire CSV (or ZIP when `.asZip()` is set) as an in-memory `Buffer`.
+   * For large datasets prefer `.run()` or `.pipe()` to avoid loading all data in memory.
+   * `.maxRowsPerFile()` requires `.asZip()` when using `toBuffer()`.
    */
   async toBuffer(): Promise<CsvBufferResult> {
+    if (this._maxRowsPerFile > 0 && !this._asZip) {
+      throw new Error(
+        '.toBuffer() with .maxRowsPerFile() requires .asZip().\n' +
+        'Call .asZip() so all CSV files are returned as a single ZIP Buffer.\n' +
+        'For large data, prefer .run() or .pipe() to avoid loading the entire ZIP in memory.'
+      );
+    }
+
+    if (this._asZip) {
+      const chunks    : Buffer[] = [];
+      const pass                 = new PassThrough();
+      pass.on('data', (chunk: Buffer) => chunks.push(chunk));
+      const passDone = new Promise<void>((resolve, reject) => { pass.on('finish', resolve); pass.on('error', reject); });
+
+      const archive    = archiver('zip', { zlib: { level: this._compress ? this._compressLevel : 0 } });
+      let archiveError : string | null = null;
+      archive.on('error', (err: Error) => { archiveError = err.message; });
+      archive.pipe(pass);
+
+      const prefix = this._filePrefix;
+      const result = await this._executeWithSplit(async (i) => {
+        if (archiveError) throw new Error(archiveError);
+        const name  = this._maxRowsPerFile > 0 ? `${prefix}_${i + 1}.csv` : `${prefix}.csv`;
+        const entry = new PassThrough();
+        archive.append(entry, { name });
+        return { stream: entry, finalize: async () => { entry.end(); } };
+      });
+
+      const finalizeP = new Promise<void>((resolve, reject) => {
+        archive.on('finish', resolve);
+        archive.on('error', (err: Error) => { archiveError = err.message; reject(err); });
+      });
+      archive.finalize();
+      await finalizeP.catch(() => {});
+      if (!pass.writableEnded) pass.end();
+      await passDone.catch(() => {});
+
+      const success = result.success && !archiveError;
+      return {
+        success,
+        rowsWritten: result.rowsWritten,
+        error      : result.error ?? archiveError ?? undefined,
+        buffer     : success ? Buffer.concat(chunks) : Buffer.alloc(0),
+      };
+    }
+
     const chunks: Buffer[] = [];
     const pass             = new PassThrough();
     pass.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const done = new Promise<void>((resolve, reject) => {
-      pass.on('finish', resolve);
-      pass.on('error', reject);
-    });
+    const done = new Promise<void>((resolve, reject) => { pass.on('finish', resolve); pass.on('error', reject); });
     const result = await this._execute(pass);
     if (!pass.writableEnded) pass.end();
     await done.catch(() => {});
