@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1.0] - 2026-06-03
+
+### Fixed
+
+- **"Showing rows" end value was wrong when `maxRowsPerFile < maxRowsPerSheet`** — the end row was calculated using `_maxRowsPerSheet` (e.g. the default 1,000,000) instead of being capped by the actual file row limit. For example, with `maxRowsPerFile(500_000)` and default `maxRowsPerSheet`, file 1 incorrectly showed `"Showing rows 1 – 1,000,000 of 2,700,636 total"` instead of `"Showing rows 1 – 500,000 of 2,700,636 total"`. Fixed by also capping end with `globalRowOffset + maxRows` in the `Math.min` calculation.
+
+### Changed
+
+- **Dual "File / Sheet" row range labels when multiple sheets exist per file** — when `maxRowsPerFile > maxRowsPerSheet` (i.e. one file can contain more than one sheet), the row range summary is now split into two lines:
+  - **`File: Showing rows X – Y of Z total`** — appears on the **first sheet only**, showing the row range covered by the entire file.
+  - **`Sheet: Showing rows X – Y of Z total`** — appears on **every sheet**, showing the row range for that individual sheet.
+  - When `maxRowsPerFile ≤ maxRowsPerSheet` (at most one sheet per file), only a single `"Showing rows X – Y of Z total"` line is shown (no prefix), unchanged from before.
+- **`_executeSheet` (single-file path) now prefixes `"Sheet: "` on split sheets** — when total rows exceed `maxRowsPerSheet` inside a single file, each sheet's row range summary now carries the `"Sheet: "` prefix to clarify it refers to that sheet's slice, not the full dataset.
+
+---
+
 ## [2.0.7] - 2026-06-02
 
 ### Fixed
