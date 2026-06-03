@@ -943,10 +943,12 @@ class OracleSqlToExcelBuilder {
 
       // Row range summary — all sheets including splits
       if (sheetCfg._resolvedTotalRows != null) {
-        const fmt    = (n: number): string => n.toLocaleString('en-US');
-        const start  = sheetIndex * sheetCfg._maxRowsPerSheet + 1;
-        const end    = Math.min((sheetIndex + 1) * sheetCfg._maxRowsPerSheet, sheetCfg._resolvedTotalRows);
-        const text   = `Showing rows ${fmt(start)} – ${fmt(end)} of ${fmt(sheetCfg._resolvedTotalRows)} total`;
+        const fmt         = (n: number): string => n.toLocaleString('en-US');
+        const isMultiSheet = sheetCfg._resolvedTotalRows > sheetCfg._maxRowsPerSheet;
+        const start       = sheetIndex * sheetCfg._maxRowsPerSheet + 1;
+        const end         = Math.min((sheetIndex + 1) * sheetCfg._maxRowsPerSheet, sheetCfg._resolvedTotalRows);
+        const prefix      = isMultiSheet ? 'Sheet: ' : '';
+        const text        = `${prefix}Showing rows ${fmt(start)} – ${fmt(end)} of ${fmt(sheetCfg._resolvedTotalRows)} total`;
         dbg(`  rangeInfo: "${text}"`);
         const rangeRow = worksheet.addRow([text]);
         rangeRow.font  = { italic: true, color: { argb: 'FF404040' } };
@@ -1167,14 +1169,34 @@ class OracleSqlToExcelBuilder {
         prependedRows++;
       }
       if (sheetCfg._resolvedTotalRows != null) {
-        const fmt      = (n: number): string => n.toLocaleString('en-US');
-        const start    = globalRowOffset + sheetIndex * sheetCfg._maxRowsPerSheet + 1;
-        const end      = Math.min(globalRowOffset + (sheetIndex + 1) * sheetCfg._maxRowsPerSheet, sheetCfg._resolvedTotalRows);
-        const rangeRow = worksheet.addRow([`Showing rows ${fmt(start)} – ${fmt(end)} of ${fmt(sheetCfg._resolvedTotalRows)} total`]);
-        rangeRow.font  = { italic: true, color: { argb: 'FF404040' } };
-        if (colCount > 1) worksheet.mergeCells(rangeRow.number, 1, rangeRow.number, colCount);
-        rangeRow.commit();
-        prependedRows++;
+        const fmt               = (n: number): string => n.toLocaleString('en-US');
+        const isMultiSheetPerFile = maxRows > sheetCfg._maxRowsPerSheet;
+        const addRangeRow = (text: string): void => {
+          const row = worksheet.addRow([text]);
+          row.font  = { italic: true, color: { argb: 'FF404040' } };
+          if (colCount > 1) worksheet.mergeCells(row.number, 1, row.number, colCount);
+          row.commit();
+          prependedRows++;
+        };
+
+        // File-level range: first sheet of each file only
+        if (sheetIndex === 0) {
+          const fileStart = globalRowOffset + 1;
+          const fileEnd   = Math.min(globalRowOffset + maxRows, sheetCfg._resolvedTotalRows);
+          const prefix    = isMultiSheetPerFile ? 'File: ' : '';
+          addRangeRow(`${prefix}Showing rows ${fmt(fileStart)} – ${fmt(fileEnd)} of ${fmt(sheetCfg._resolvedTotalRows)} total`);
+        }
+
+        // Sheet-level range: every sheet, only when multiple sheets exist per file
+        if (isMultiSheetPerFile) {
+          const sheetStart = globalRowOffset + sheetIndex * sheetCfg._maxRowsPerSheet + 1;
+          const sheetEnd   = Math.min(
+            globalRowOffset + (sheetIndex + 1) * sheetCfg._maxRowsPerSheet,
+            globalRowOffset + maxRows,
+            sheetCfg._resolvedTotalRows
+          );
+          addRangeRow(`Sheet: Showing rows ${fmt(sheetStart)} – ${fmt(sheetEnd)} of ${fmt(sheetCfg._resolvedTotalRows)} total`);
+        }
       }
       if (resolvedColDefs) {
         const headerRowNum = prependedRows + 1;
