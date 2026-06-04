@@ -342,12 +342,25 @@ function writeMergedRows(
   docHeaderRows : DocHeaderRow[],
   colCount      : number
 ): number {
-  // blockedUntil[col] = last row index still occupied by a mergeDown from a previous row
+  // Use a relative row counter (1-based within this call) for blockedUntil tracking.
+  // ExcelJS streaming may assign non-sequential row.number values when mergeCells creates
+  // phantom rows for the merge range, so we cannot rely on row.number for blocking logic.
   const blockedUntil: Record<number, number> = {};
+  let relRow       = 1;
+  let baseActualNum = -1;
 
   for (const docHeaderRow of docHeaderRows) {
-    const row    = ws.addRow([]);
-    const rowNum = row.number;
+    // For the first row use addRow to get the worksheet's current position.
+    // For subsequent rows use getRow(expected) because ws.mergeCells() called during the
+    // first row may create phantom rows internally, causing addRow to skip row numbers.
+    let row: ExcelJS.Row;
+    if (relRow === 1) {
+      row = ws.addRow([]);
+      baseActualNum = row.number;
+    } else {
+      row = ws.getRow(baseActualNum + relRow - 1);
+    }
+    const actualNum = baseActualNum + relRow - 1;
 
     if (docHeaderRow.height) row.height = docHeaderRow.height;
 
@@ -355,26 +368,30 @@ function writeMergedRows(
       // ── Multi-column mode ─────────────────────────────────────────────────────
       let col = 1;
       for (const cellDef of docHeaderRow.columns) {
-        // Skip columns blocked by a mergeDown from a previous row
-        while (col <= colCount && (blockedUntil[col] ?? 0) >= rowNum) col++;
+        // Explicitly write empty cells for columns blocked by a mergeDown from a previous row.
+        // This is required for ExcelJS streaming to include the cells in the row XML so that
+        // the queued mergeCells range is applied correctly when the worksheet is committed.
+        while (col <= colCount && (blockedUntil[col] ?? 0) >= relRow) {
+          row.getCell(col).value = '';
+          col++;
+        }
         if (col > colCount) break;
 
         const mergeAcross = cellDef.mergeAcross ?? 0;
         const mergeDown   = cellDef.mergeDown   ?? 0;
         const endCol      = col + mergeAcross;
-        const endRow      = rowNum + mergeDown;
 
         row.getCell(col).value = cellDef.text ?? '';
         applyDocHeaderCellStyle(row.getCell(col), cellDef.style);
 
         if (mergeAcross > 0 || mergeDown > 0) {
-          ws.mergeCells(rowNum, col, endRow, endCol);
+          ws.mergeCells(actualNum, col, actualNum + mergeDown, endCol);
         }
 
-        // Mark columns as blocked for subsequent rows
+        // Mark columns blocked using relative row numbers
         if (mergeDown > 0) {
           for (let c = col; c <= endCol; c++) {
-            blockedUntil[c] = endRow;
+            blockedUntil[c] = relRow + mergeDown;
           }
         }
 
@@ -386,11 +403,12 @@ function writeMergedRows(
       applyDocHeaderCellStyle(row.getCell(1), docHeaderRow.style);
 
       if ((docHeaderRow.merge ?? true) && colCount > 1) {
-        ws.mergeCells(rowNum, 1, rowNum, colCount);
+        ws.mergeCells(actualNum, 1, actualNum, colCount);
       }
     }
 
     row.commit();
+    relRow++;
   }
 
   return docHeaderRows.length;
@@ -1017,16 +1035,13 @@ class OracleSqlToExcelBuilder {
       }
 
       if (resolvedColDefs) {
-        let headerRowNum: number;
-
         if (sheetCfg._headerGroups.length > 0) {
           prependedRows += writeMergedRows(worksheet, sheetCfg._headerGroups, colCount);
-          headerRowNum = prependedRows;
-          dbg(`  headerGroups written (${sheetCfg._headerGroups.length} rows), headerRowNum=${headerRowNum}`);
-        } else {
-          headerRowNum = prependedRows + 1;
-          dbg(`  headerRowNum=${headerRowNum}`);
+          dbg(`  headerGroups written (${sheetCfg._headerGroups.length} rows)`);
         }
+
+        const headerRowNum = prependedRows + 1;
+        dbg(`  headerRowNum=${headerRowNum}`);
 
         if (sheetCfg._freezeHeader) {
           worksheet.views.splice(0, worksheet.views.length, { state: 'frozen', ySplit: headerRowNum });
@@ -1041,10 +1056,8 @@ class OracleSqlToExcelBuilder {
           dbg('  autoFilter set');
         }
 
-        if (sheetCfg._headerGroups.length === 0) {
-          writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
-          dbg('  headerRow committed');
-        }
+        writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
+        dbg('  headerRow committed');
       }
 
       dbg(`createNewSheet done — "${name}"`);
@@ -1268,23 +1281,17 @@ class OracleSqlToExcelBuilder {
         }
       }
       if (resolvedColDefs) {
-        let headerRowNum: number;
-
         if (sheetCfg._headerGroups.length > 0) {
           prependedRows += writeMergedRows(worksheet, sheetCfg._headerGroups, colCount);
-          headerRowNum = prependedRows;
-        } else {
-          headerRowNum = prependedRows + 1;
         }
 
+        const headerRowNum = prependedRows + 1;
         if (sheetCfg._freezeHeader) worksheet.views.splice(0, worksheet.views.length, { state: 'frozen', ySplit: headerRowNum });
         if (sheetCfg._autoFilter) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (worksheet as any).autoFilter = { from: { row: headerRowNum, column: 1 }, to: { row: headerRowNum, column: resolvedColDefs.length } };
         }
-        if (sheetCfg._headerGroups.length === 0) {
-          writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
-        }
+        writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
       }
     };
 

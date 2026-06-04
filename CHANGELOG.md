@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.2] - 2026-06-04
+
+### Fixed
+
+- **`headerGroups` phantom-row bug with `mergeDown`** — `ws.mergeCells()` in ExcelJS streaming internally reserves the target row, causing the next `ws.addRow([])` to skip that row number. Sub-column labels were being written to the wrong row, leaving an empty phantom row between group headers and sub-headers. Fixed by using `ws.getRow(expectedRowNum)` for rows after the first instead of `ws.addRow([])`.
+- **`mergeDown` cells not rendering as merged** — blocked cells (those covered by a vertical merge from a previous row) were never written to the worksheet XML, so ExcelJS did not apply the merge visually. Fixed by explicitly writing an empty value to each blocked cell so it appears in the row XML.
+- **Column blocking used `row.number` from ExcelJS** — due to the phantom-row issue, `row.number` for subsequent rows was higher than expected, breaking the `blockedUntil` check. Fixed by using a relative internal counter (`relRow`) instead of `row.number` for all blocking comparisons.
+
+---
+
 ## [2.3.1] - 2026-06-04
 
 ### Added
@@ -138,7 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `.pipe(res)` — streams the ZIP directly to any Writable (e.g. Express response). Set `Content-Type: application/zip` and `Content-Disposition: attachment; filename="export.zip"` before piping.
   - `.run()` — writes a single `<filePrefix>.zip` file to `outputDir` and returns `ZipRunResult`.
   - `.toBuffer()` — returns the entire ZIP as a `Buffer`. **Not recommended for large data** — holds full ZIP in RAM.
-  
+
   Has no effect when `.file()` is not used (plain `.sheet()` exports are unaffected).
 
 - **`ZipRunResult`** interface exported for TypeScript callers. Contains `file: string` (absolute path to the `.zip`), `success`, `sheets`, `skippedRows`.
@@ -198,7 +208,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     .run('/tmp/export.csv');
   ```
 
-  **Methods:** `.connectionFactory()`, `.sql()`, `.columns()`, `.fetchSize()`, `.separator()`, `.withBom()`, `.onProgress()`.  
+  **Methods:** `.connectionFactory()`, `.sql()`, `.columns()`, `.fetchSize()`, `.separator()`, `.withBom()`, `.onProgress()`.
   **Terminal:** `.run(filepath)` → `CsvRunResult` · `.pipe(stream)` → `CsvResult` · `.toBuffer()` → `CsvBufferResult`.
 
 - **`CsvResult`**, **`CsvRunResult`**, **`CsvBufferResult`** types exported for TypeScript callers.
