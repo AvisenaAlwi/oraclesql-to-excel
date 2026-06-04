@@ -86,6 +86,7 @@ export interface ColumnDef {
 export interface HeaderStyle {
   /** Default: `true`. */
   bold?      : boolean;
+  align?     : 'left' | 'center' | 'right';
   /** Background fill color hex, e.g. `'4472C4'` for blue. */
   bgColor?   : string;
   /** Font color hex, e.g. `'FFFFFF'` for white. */
@@ -277,6 +278,9 @@ function writeHeaderRow(
       pattern: 'solid',
       fgColor: { argb: 'FF' + headerStyle.bgColor.replace(/^#/, '') },
     } as ExcelJS.Fill;
+  }
+  if (headerStyle?.align) {
+    row.alignment = { horizontal: headerStyle.align, vertical: 'middle' };
   }
 
   row.commit();
@@ -1013,13 +1017,16 @@ class OracleSqlToExcelBuilder {
       }
 
       if (resolvedColDefs) {
+        let headerRowNum: number;
+
         if (sheetCfg._headerGroups.length > 0) {
           prependedRows += writeMergedRows(worksheet, sheetCfg._headerGroups, colCount);
-          dbg(`  headerGroups written (${sheetCfg._headerGroups.length} rows)`);
+          headerRowNum = prependedRows;
+          dbg(`  headerGroups written (${sheetCfg._headerGroups.length} rows), headerRowNum=${headerRowNum}`);
+        } else {
+          headerRowNum = prependedRows + 1;
+          dbg(`  headerRowNum=${headerRowNum}`);
         }
-
-        const headerRowNum = prependedRows + 1;
-        dbg(`  headerRowNum=${headerRowNum}`);
 
         if (sheetCfg._freezeHeader) {
           worksheet.views.splice(0, worksheet.views.length, { state: 'frozen', ySplit: headerRowNum });
@@ -1034,8 +1041,10 @@ class OracleSqlToExcelBuilder {
           dbg('  autoFilter set');
         }
 
-        writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
-        dbg('  headerRow committed');
+        if (sheetCfg._headerGroups.length === 0) {
+          writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
+          dbg('  headerRow committed');
+        }
       }
 
       dbg(`createNewSheet done — "${name}"`);
@@ -1259,17 +1268,23 @@ class OracleSqlToExcelBuilder {
         }
       }
       if (resolvedColDefs) {
+        let headerRowNum: number;
+
         if (sheetCfg._headerGroups.length > 0) {
           prependedRows += writeMergedRows(worksheet, sheetCfg._headerGroups, colCount);
+          headerRowNum = prependedRows;
+        } else {
+          headerRowNum = prependedRows + 1;
         }
 
-        const headerRowNum = prependedRows + 1;
         if (sheetCfg._freezeHeader) worksheet.views.splice(0, worksheet.views.length, { state: 'frozen', ySplit: headerRowNum });
         if (sheetCfg._autoFilter) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (worksheet as any).autoFilter = { from: { row: headerRowNum, column: 1 }, to: { row: headerRowNum, column: resolvedColDefs.length } };
         }
-        writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
+        if (sheetCfg._headerGroups.length === 0) {
+          writeHeaderRow(worksheet, resolvedColDefs, sheetCfg._headerStyle);
+        }
       }
     };
 

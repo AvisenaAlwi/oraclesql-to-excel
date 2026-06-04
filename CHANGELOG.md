@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.1] - 2026-06-04
+
+### Added
+
+- **`align` on `HeaderStyle`** — controls horizontal text alignment of the column header row. Accepts `'left'`, `'center'`, or `'right'`. Example: `.headerStyle({ bgColor: '4472C4', fontColor: 'FFFFFF', bold: true, align: 'center' })`.
+
+### Fixed
+
+- **`headerGroups` rendered an extra duplicate header row** — when `.headerGroups()` was used, the last group row (sub-column labels) and the regular column header row were both written, producing a duplicate row with filter dropdowns on the wrong row. The fix: when `headerGroups` is provided the last group row serves as the column header row and `writeHeaderRow` is skipped. `autoFilter` and `freezeHeader` now target the last group row correctly.
+
+---
+
 ## [2.3.0] - 2026-06-04
 
 ### Added

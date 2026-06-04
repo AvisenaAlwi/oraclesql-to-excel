@@ -146,7 +146,7 @@ Received as argument `s` inside the `.sheet(name, fn)` callback.
 | `.fetchSize(n)` | `50_000` | Rows fetched per Oracle round-trip. |
 | `.freezeHeader()` | off | Freeze the header row. |
 | `.autoFilter()` | off | Add dropdown filter to every header column. |
-| `.headerStyle(obj)` | bold | Override column header row style. See `HeaderStyle`. |
+| `.headerStyle(obj)` | bold | Override column header row style. See [`HeaderStyle`](#headerstyle). |
 | `.docHeader(rows)` | none | Custom rows above the table header. First sheet only. See [Document Header](#document-header). |
 | `.headerGroups(rows)` | none | Multi-level grouped header rows written immediately above the column header. Supports `mergeAcross` and `mergeDown`. See [Multi-Level Column Header](#multi-level-column-header-headergroups). |
 | `.showTotalRows()` | off | Prepend "Showing rows X – Y of Z total". Runs COUNT in parallel. |
@@ -218,6 +218,27 @@ For CSV, only `key` and `header` are used.
 - `date` — default format `dd/mm/yyyy`.
 - `datetime` — default format `dd/mm/yyyy hh:mm:ss`.
 - `text` — all values cast via `String()`.
+
+---
+
+### `HeaderStyle`
+
+Passed to `.headerStyle()` on `SheetConfig`. Applies to the column header row.
+
+```js
+{
+  bold      : true,       // Bold text. Default: true.
+  align     : 'center',   // 'left' | 'center' | 'right'
+  bgColor   : '4472C4',   // Background fill color (hex, with or without #)
+  fontColor : 'FFFFFF',   // Font color (hex, with or without #)
+}
+```
+
+Example:
+
+```js
+.headerStyle({ bgColor: '4472C4', fontColor: 'FFFFFF', bold: true, align: 'center' })
+```
 
 ---
 
