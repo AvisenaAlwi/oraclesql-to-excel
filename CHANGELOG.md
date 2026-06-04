@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.2.0] - 2026-06-04
+
+### Added
+
+- **`.locale(value)` on `OracleSqlToExcelBuilder` and `OracleSqlToCsvBuilder`** — BCP 47 locale tag used to format numbers in the `"Showing rows X – Y of Z total"` summary produced by `.showTotalRows()`. Controls the thousand and decimal separators. Default: `'en-US'` (`1,000,000`). Example: `.locale('id-ID')` → `1.000.000`.
+- **`.docHeader()` on `OracleSqlToCsvBuilder`** — prepend one or more rows above the column header on every CSV file, matching the API already available on `SheetConfig`. Accepts an array of `DocHeaderRow` objects. Only `text` (simple mode) and `columns[].text` (column mode) are written; style, merge, and height are ignored in plain-text CSV. The doc header is written on every file segment when `.maxRowsPerFile()` is used.
+
+### Changed
+
+- **Builder internal fields and methods are now truly `private`** — `OracleSqlToExcelBuilder` and `OracleSqlToCsvBuilder` internal members (all `_`-prefixed fields and `_execute*` methods) now carry the TypeScript `private` keyword in addition to the existing `/** @private */` JSDoc tag. IDE autocomplete no longer surfaces these members when working with a builder instance.
+
+---
+
 ## [2.1.0] - 2026-06-03
 
 ### Fixed
