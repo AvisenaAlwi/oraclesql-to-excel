@@ -1998,6 +1998,17 @@ function escapeCsvField(value: string, separator: string): string {
   return value;
 }
 
+/** @private */
+function writeCsvDocHeader(rows: DocHeaderRow[], sep: string, stream: Writable): void {
+  for (const row of rows) {
+    if (Array.isArray(row.columns)) {
+      stream.write(row.columns.map((c) => escapeCsvField(c.text ?? '', sep)).join(sep) + '\n');
+    } else {
+      stream.write(escapeCsvField(row.text ?? '', sep) + '\n');
+    }
+  }
+}
+
 // ── OracleSqlToCsvBuilder ─────────────────────────────────────────────────────
 
 /**
@@ -2042,6 +2053,7 @@ class OracleSqlToCsvBuilder {
   /** @private */ private _compressLevel     : number;
   /** @private */ private _filePrefix        : string;
   /** @private */ private _locale            : string;
+  /** @private */ private _docHeader         : DocHeaderRow[];
 
   constructor() {
     this._connectionFactory = null;
@@ -2059,6 +2071,7 @@ class OracleSqlToCsvBuilder {
     this._compressLevel     = 1;
     this._filePrefix        = 'export';
     this._locale            = 'en-US';
+    this._docHeader         = [];
   }
 
   /**
@@ -2153,6 +2166,19 @@ class OracleSqlToCsvBuilder {
   filePrefix(value: string): this { this._filePrefix = value; return this; }
 
   /**
+   * Rows to prepend above the column header on every file. Only `text` (simple mode) and
+   * `columns[].text` (column mode) are written — style, merge, and height are ignored in CSV.
+   *
+   * @example
+   * .docHeader([
+   *   { text: 'Laporan BMN Rusak' },
+   *   { text: 'Per tanggal: 2026-06-04' },
+   *   { text: '' },
+   * ])
+   */
+  docHeader(rows: DocHeaderRow[]): this { this._docHeader = rows; return this; }
+
+  /**
    * BCP 47 locale tag used to format numbers. Default: `'en-US'`.
    * @example
    * .locale('id-ID')  // → 1.000.000
@@ -2199,8 +2225,9 @@ class OracleSqlToCsvBuilder {
         prefetchedRows = firstRows;
       }
 
-      // Write BOM + header
+      // Write BOM + doc header + column header
       if (this._withBom) stream.write('﻿');
+      if (this._docHeader.length > 0) writeCsvDocHeader(this._docHeader, this._separator, stream);
       stream.write(cols.map((c) => escapeCsvField(c.header ?? c.key, this._separator)).join(this._separator) + '\n');
 
       // Pre-compute separator and key array once — avoids repeated property lookups in the hot loop
@@ -2307,6 +2334,7 @@ class OracleSqlToCsvBuilder {
       outer: while (true) {
         const { stream, finalize } = await getStream(fileCount++);
         if (this._withBom) stream.write('﻿');
+        if (this._docHeader.length > 0) writeCsvDocHeader(this._docHeader, sep, stream);
         stream.write(headerLine);
 
         let fileRows = 0;

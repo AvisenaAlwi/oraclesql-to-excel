@@ -1,7 +1,7 @@
 {
   "name": "@avisenaalwi/oraclesql-to-excel",
   "version": "2.1.0",
-  "description": "Stream Oracle SQL query results directly into Excel (.xlsx) files. Supports multi-sheet, split sheets, doc headers, streaming to HTTP/Buffer, and more.",
+  "description": "Stream Oracle SQL query results directly into Excel (.xlsx) or CSV files. Supports multi-sheet, split sheets, doc headers, streaming to HTTP/Buffer, and more.",
   "main": "./dist/index.js",
   "module": "./index.mjs",
   "types": "./dist/index.d.ts",
