@@ -667,18 +667,19 @@ class FileConfig {
  *   .pipe(res);
  */
 class OracleSqlToExcelBuilder {
-  /** @private */ _connectionFactory      : (() => Promise<OracleConnection>) | null;
-  /** @private */ _executeOptions         : Record<string, unknown>;
-  /** @private */ _outputDir              : string;
-  /** @private */ _filePrefix             : string;
-  /** @private */ _compress               : boolean;
-  /** @private */ _compressLevel         : number;
-  /** @private */ _debug                  : boolean;
-  /** @private */ _onProgressCb           : ((info: ProgressInfo) => void) | null;
-  /** @private */ _sheets                 : SheetConfig[];
-  /** @private */ _files                  : FileConfig[];
-  /** @private */ _backpressureThreshold  : number;
-  /** @private */ _asZip                  : boolean;
+  /** @private */ private _connectionFactory      : (() => Promise<OracleConnection>) | null;
+  /** @private */ private _executeOptions         : Record<string, unknown>;
+  /** @private */ private _outputDir              : string;
+  /** @private */ private _filePrefix             : string;
+  /** @private */ private _compress               : boolean;
+  /** @private */ private _compressLevel         : number;
+  /** @private */ private _debug                  : boolean;
+  /** @private */ private _onProgressCb           : ((info: ProgressInfo) => void) | null;
+  /** @private */ private _sheets                 : SheetConfig[];
+  /** @private */ private _files                  : FileConfig[];
+  /** @private */ private _backpressureThreshold  : number;
+  /** @private */ private _asZip                  : boolean;
+  /** @private */ private _locale                 : string;
 
   constructor() {
     this._connectionFactory     = null;
@@ -693,6 +694,7 @@ class OracleSqlToExcelBuilder {
     this._files                 = [];
     this._backpressureThreshold = 256 * 1024 * 1024; // 256 MB
     this._asZip                 = false;
+    this._locale                = 'en-US';
   }
 
   // ── Workbook-level methods ─────────────────────────────────────────────────
@@ -766,6 +768,20 @@ class OracleSqlToExcelBuilder {
     this._compressLevel = level;
     return this;
   }
+
+  /**
+   * BCP 47 locale tag used to format numbers in the `"Showing rows X – Y of Z total"` summary
+   * produced by `.showTotalRows()`. Controls the thousand and decimal separators.
+   *
+   * Default: `'en-US'` (comma thousand separator, e.g. `1,000,000`).
+   *
+   * @example
+   * .locale('id-ID')  // → 1.000.000
+   * .locale('de-DE')  // → 1.000.000
+   * .locale('fr-FR')  // → 1 000 000
+   * .locale('en-US')  // → 1,000,000  (default)
+   */
+  locale(value: string): this { this._locale = value; return this; }
 
   /**
    * Maximum process RSS (Resident Set Size) allowed during `.pipe()` streaming before the
@@ -881,7 +897,7 @@ class OracleSqlToExcelBuilder {
    * Streams one sheet's SQL result into the workbook.
    * @private
    */
-  async _executeSheet(
+  private async _executeSheet(
     connection  : OracleConnection,
     workbook    : StreamWorkbook,
     sheetCfg    : SheetConfig,
@@ -943,7 +959,7 @@ class OracleSqlToExcelBuilder {
 
       // Row range summary — all sheets including splits
       if (sheetCfg._resolvedTotalRows != null) {
-        const fmt         = (n: number): string => n.toLocaleString('en-US');
+        const fmt         = (n: number): string => n.toLocaleString(this._locale);
         const isMultiSheet = sheetCfg._resolvedTotalRows > sheetCfg._maxRowsPerSheet;
         const start       = sheetIndex * sheetCfg._maxRowsPerSheet + 1;
         const end         = Math.min((sheetIndex + 1) * sheetCfg._maxRowsPerSheet, sheetCfg._resolvedTotalRows);
@@ -1117,7 +1133,7 @@ class OracleSqlToExcelBuilder {
    * rows and the open ResultSet so the caller can continue in the next file.
    * @private
    */
-  async _executeSheetSegment(
+  private async _executeSheetSegment(
     connection      : OracleConnection,
     workbook        : StreamWorkbook,
     sheetCfg        : SheetConfig,
@@ -1169,7 +1185,7 @@ class OracleSqlToExcelBuilder {
         prependedRows++;
       }
       if (sheetCfg._resolvedTotalRows != null) {
-        const fmt               = (n: number): string => n.toLocaleString('en-US');
+        const fmt               = (n: number): string => n.toLocaleString(this._locale);
         const isMultiSheetPerFile = maxRows > sheetCfg._maxRowsPerSheet;
         const addRangeRow = (text: string): void => {
           const row = worksheet.addRow([text]);
@@ -1310,7 +1326,7 @@ class OracleSqlToExcelBuilder {
    * Multi-file execution: splits one sheet's result across multiple .xlsx files.
    * @private
    */
-  async _executeFileConfig(cfg: FileConfig): Promise<MultiRunResult> {
+  private async _executeFileConfig(cfg: FileConfig): Promise<MultiRunResult> {
     const allSheets   : string[]      = [];
     const allFiles    : FileSegment[] = [];
     const progressCtx : ProgressCtx   = { totalRowsWritten: 0 };
@@ -1444,7 +1460,7 @@ class OracleSqlToExcelBuilder {
    * sequentially into named ZIP entries via archiver.
    * @private
    */
-  async _executeAsZip(
+  private async _executeAsZip(
     outputStream : Writable,
     drainFn      : (() => Promise<void>) | null
   ): Promise<Result> {
@@ -1596,7 +1612,7 @@ class OracleSqlToExcelBuilder {
    * Core execution logic shared by `.run()`, `.pipe()`, and `.toBuffer()`.
    * @private
    */
-  async _execute(workbookTarget: WorkbookTarget): Promise<Result> {
+  private async _execute(workbookTarget: WorkbookTarget): Promise<Result> {
     const allSheets   : string[]     = [];
     const progressCtx : ProgressCtx  = { totalRowsWritten: 0 };
 
@@ -2011,20 +2027,21 @@ function escapeCsvField(value: string, separator: string): string {
  *   .run('/tmp/export.csv');
  */
 class OracleSqlToCsvBuilder {
-  /** @private */ _connectionFactory : (() => Promise<OracleConnection>) | null;
-  /** @private */ _sql               : string;
-  /** @private */ _param             : Record<string, unknown>;
-  /** @private */ _executeOptions    : Record<string, unknown>;
-  /** @private */ _columns           : Pick<ColumnDef, 'key' | 'header'>[];
-  /** @private */ _fetchSize         : number;
-  /** @private */ _separator         : string;
-  /** @private */ _withBom           : boolean;
-  /** @private */ _onProgressCb      : ((info: { rowsWritten: number }) => void) | null;
-  /** @private */ _maxRowsPerFile    : number;
-  /** @private */ _asZip             : boolean;
-  /** @private */ _compress          : boolean;
-  /** @private */ _compressLevel     : number;
-  /** @private */ _filePrefix        : string;
+  /** @private */ private _connectionFactory : (() => Promise<OracleConnection>) | null;
+  /** @private */ private _sql               : string;
+  /** @private */ private _param             : Record<string, unknown>;
+  /** @private */ private _executeOptions    : Record<string, unknown>;
+  /** @private */ private _columns           : Pick<ColumnDef, 'key' | 'header'>[];
+  /** @private */ private _fetchSize         : number;
+  /** @private */ private _separator         : string;
+  /** @private */ private _withBom           : boolean;
+  /** @private */ private _onProgressCb      : ((info: { rowsWritten: number }) => void) | null;
+  /** @private */ private _maxRowsPerFile    : number;
+  /** @private */ private _asZip             : boolean;
+  /** @private */ private _compress          : boolean;
+  /** @private */ private _compressLevel     : number;
+  /** @private */ private _filePrefix        : string;
+  /** @private */ private _locale            : string;
 
   constructor() {
     this._connectionFactory = null;
@@ -2041,6 +2058,7 @@ class OracleSqlToCsvBuilder {
     this._compress          = false;
     this._compressLevel     = 1;
     this._filePrefix        = 'export';
+    this._locale            = 'en-US';
   }
 
   /**
@@ -2134,10 +2152,18 @@ class OracleSqlToCsvBuilder {
    */
   filePrefix(value: string): this { this._filePrefix = value; return this; }
 
+  /**
+   * BCP 47 locale tag used to format numbers. Default: `'en-US'`.
+   * @example
+   * .locale('id-ID')  // → 1.000.000
+   * .locale('en-US')  // → 1,000,000  (default)
+   */
+  locale(value: string): this { this._locale = value; return this; }
+
   // ── Internal ────────────────────────────────────────────────────────────────
 
   /** @private */
-  async _execute(stream: Writable): Promise<CsvResult> {
+  private async _execute(stream: Writable): Promise<CsvResult> {
     let connection : OracleConnection | null = null;
     let resultSet  : OracleResultSet  | null = null;
     let rowsWritten = 0;
@@ -2228,7 +2254,7 @@ class OracleSqlToCsvBuilder {
    * Columns and the Oracle connection are opened once and reused across all segments.
    * @private
    */
-  async _executeWithSplit(
+  private async _executeWithSplit(
     getStream: (fileIndex: number) => Promise<{ stream: Writable; finalize: () => Promise<void> }>
   ): Promise<{ success: boolean; rowsWritten: number; fileCount: number; error?: string }> {
     let connection  : OracleConnection | null = null;
