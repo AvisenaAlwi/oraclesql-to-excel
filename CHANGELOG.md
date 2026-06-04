@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.0] - 2026-06-04
+
+### Added
+
+- **`.headerGroups(rows)` on `SheetConfig`** — multi-level grouped header rows written immediately above the column header row. Accepts the same `DocHeaderRow[]` format as `.docHeader()`, with full support for `mergeAcross` (additional columns to the right) and `mergeDown` (additional rows downward). Columns blocked by a `mergeDown` cell from a previous row are skipped automatically. `.freezeHeader()` and `.autoFilter()` continue to target the actual column header row, not the group rows.
+
+---
+
 ## [2.2.0] - 2026-06-04
 
 ### Added

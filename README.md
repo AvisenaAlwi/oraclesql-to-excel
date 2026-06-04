@@ -10,6 +10,7 @@ Stream Oracle SQL query results directly into Excel (`.xlsx`) or CSV files with 
 - **HTTP streaming** — pipe directly to an Express/Fastify response, no temp file
 - **Buffer output** — return as `Buffer` for S3 uploads, email attachments, or DB BLOBs
 - **Document headers** — custom rows above the table (title, period, logo placeholders) with merge and style support
+- **Multi-level column headers** — grouped header rows with horizontal and vertical cell merging via `.headerGroups()`
 - **Row range summary** — "Showing rows X – Y of Z total" auto-prepended per sheet via a parallel COUNT query
 - **Auto-filter & freeze header** — one method call each
 - **Per-column formatting** — number formats, alignment, wrap text, font/bg colors
@@ -116,6 +117,7 @@ Returns a new `OracleSqlToExcelBuilder`. All methods are chainable.
 | `.outputDir(path)` | `process.cwd()` | Directory for `.run()` output. |
 | `.filePrefix(name)` | `'export'` | Output filename without extension. Saved as `<name>.xlsx`. |
 | `.compress(bool, level?)` | `false` / `1` | Enable XLSX ZIP compression (and outer ZIP level when using `.asZip()`). `level` is zlib `0`–`9`, default `1`. Slower but smaller file. Recommended for `.run()`, not `.pipe()`. |
+| `.locale(tag)` | `'en-US'` | BCP 47 locale tag for number formatting in the `showTotalRows` summary (e.g. `'id-ID'` → `1.000.000`, `'en-US'` → `1,000,000`). |
 | `.debug(bool)` | `false` | Verbose logging. Active only when `NODE_ENV` is not `production`. |
 | `.onProgress(cb)` | — | Called after each fetch batch. See [Progress Tracking](#progress-tracking-websocket--sse). |
 | `.backpressureThreshold(bytes)` | `268435456` (256 MB) | Pause Oracle fetch when process RSS exceeds this value during `.pipe()`. See [Backpressure & Memory](#backpressure--memory). |
@@ -146,6 +148,7 @@ Received as argument `s` inside the `.sheet(name, fn)` callback.
 | `.autoFilter()` | off | Add dropdown filter to every header column. |
 | `.headerStyle(obj)` | bold | Override column header row style. See `HeaderStyle`. |
 | `.docHeader(rows)` | none | Custom rows above the table header. First sheet only. See [Document Header](#document-header). |
+| `.headerGroups(rows)` | none | Multi-level grouped header rows written immediately above the column header. Supports `mergeAcross` and `mergeDown`. See [Multi-Level Column Header](#multi-level-column-header-headergroups). |
 | `.showTotalRows()` | off | Prepend "Showing rows X – Y of Z total". Runs COUNT in parallel. |
 | `.onRowError(mode)` | `'throw'` | `'throw'` aborts on first bad row. `'skip'` drops it and continues. |
 
@@ -178,6 +181,8 @@ Unlike Excel, CSV writes each row directly to the output stream with no intermed
 | `.fetchSize(n)` | `50_000` | Rows fetched per Oracle round-trip. |
 | `.separator(char)` | `','` | Field separator. Use `';'` for European Excel, `'\t'` for TSV. |
 | `.withBom(bool)` | `true` | Prepend UTF-8 BOM so Windows Excel opens the file with correct encoding. |
+| `.docHeader(rows)` | none | Rows prepended above the column header on every file. Only `text` and `columns[].text` are written — style and merge are ignored in CSV. |
+| `.locale(tag)` | `'en-US'` | BCP 47 locale tag for number formatting (e.g. `'id-ID'` → `1.000.000`). |
 | `.onProgress(cb)` | — | Called after each fetch batch with `{ rowsWritten }`. |
 
 #### Terminal methods
@@ -679,6 +684,75 @@ s.docHeader([
   { text: '' },  // spacer
 ])
 ```
+
+---
+
+### Multi-Level Column Header (headerGroups)
+
+Add grouped header rows immediately above the column header row — useful for tables with
+category spans like financial reports. Supports the same `mergeAcross` / `mergeDown`
+mechanics as `.docHeader()`.
+
+- **`mergeAcross: N`** — span N additional columns to the right (total = N + 1).
+- **`mergeDown: N`** — span N additional rows downward (total = N + 1). Columns blocked by a `mergeDown` cell are skipped automatically in subsequent rows.
+- `freezeHeader` and `autoFilter` still target the **column header row** (the last row, produced by `.columns()`), not the group rows.
+
+```js
+sheet
+  .columns([
+    { key: 'NO',         header: '(1)' },
+    { key: 'UNIT_CODE',  header: '(2)' },
+    { key: 'DESCRIPTION',header: '(3)' },
+    { key: 'INV_2025',   header: '(4)' },
+    { key: 'INV_2024',   header: '(5)' },
+    { key: 'INV_CHG',    header: '(6)' },
+    { key: 'INV_PCT',    header: '(7)' },
+    { key: 'LAND_2025',  header: '(8)' },
+    { key: 'LAND_2024',  header: '(9)' },
+    { key: 'LAND_CHG',   header: '(10)' },
+    { key: 'LAND_PCT',   header: '(11)' },
+  ])
+  .headerGroups([
+    // ── Row 1: column labels that span 2 rows + category headers ──────────────
+    {
+      columns: [
+        { text: 'No.',         mergeDown: 1, style: { bold: true, align: 'center' } },
+        { text: 'Unit Code',   mergeDown: 1, style: { bold: true, align: 'center' } },
+        { text: 'Description', mergeDown: 1, style: { bold: true, align: 'center' } },
+        // mergeAcross: 3 → spans columns 4-7 (4 columns total)
+        { text: 'Inventory', mergeAcross: 3, style: { bold: true, align: 'center' } },
+        // mergeAcross: 3 → spans columns 8-11
+        { text: 'Land',      mergeAcross: 3, style: { bold: true, align: 'center' } },
+      ],
+    },
+    // ── Row 2: sub-column headers (cols 1-3 auto-skipped due to mergeDown) ─────
+    {
+      columns: [
+        { text: 'FY 2025 (Audited)',           style: { bold: true, align: 'center' } },
+        { text: 'FY 2024 (Audited)',           style: { bold: true, align: 'center' } },
+        { text: 'Increase/\n(Decrease)',       style: { bold: true, align: 'center' } },
+        { text: '% Increase/\n(Decrease)',     style: { bold: true, align: 'center' } },
+        { text: 'FY 2025 (Audited)',           style: { bold: true, align: 'center' } },
+        { text: 'FY 2024 (Audited)',           style: { bold: true, align: 'center' } },
+        { text: 'Increase/\n(Decrease)',       style: { bold: true, align: 'center' } },
+        { text: '% Increase/\n(Decrease)',     style: { bold: true, align: 'center' } },
+      ],
+    },
+  ])
+  .freezeHeader(true)   // freezes the (1)(2)(3)... column header row, not the groups
+  .autoFilter(true)
+```
+
+The resulting sheet layout:
+
+```
+Row 1 (group)   │ No. ↕ │ Unit Code ↕ │ Description ↕ │  Inventory →→→→  │  Land →→→→  │
+Row 2 (group)   │       │             │               │FY25│FY24│Chg│% │FY25│FY24│Chg│%│
+Row 3 (header)  │  (1)  │     (2)     │      (3)      │ (4)│ (5)│(6)│(7)│(8)│(9) │…  │▼│
+Row 4+  (data)  │   1   │    A001     │  Agency Name… │  1,000,000  │ …                  │
+```
+
+> **`mergeDown` vs rowspan** — `mergeDown: 1` means the cell extends 1 row *downward* (2 rows total), equivalent to `rowspan="2"` in HTML. `mergeAcross: 3` spans 3 additional columns (4 columns total), equivalent to `colspan="4"`.
 
 ---
 

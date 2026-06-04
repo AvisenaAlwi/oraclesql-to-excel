@@ -333,7 +333,7 @@ function applyDocHeaderCellStyle(cell: ExcelJS.Cell, style: DocHeaderStyle | und
  * @param colCount      - Number of data columns (used for full-width merge in simple mode).
  * @returns Number of rows written.
  */
-function writeDocHeaderRows(
+function writeMergedRows(
   ws            : StreamWorksheet,
   docHeaderRows : DocHeaderRow[],
   colCount      : number
@@ -434,6 +434,7 @@ class SheetConfig {
   /** @private */ _headerStyle      : HeaderStyle | null;
   /** @private */ _onRowError       : 'throw' | 'skip';
   /** @private */ _docHeader        : DocHeaderRow[];
+  /** @private */ _headerGroups     : DocHeaderRow[];
   /** @private */ _showTotalRows    : boolean;
   /** @private */ _resolvedTotalRows: number | null;
 
@@ -450,6 +451,7 @@ class SheetConfig {
     this._headerStyle       = null;
     this._onRowError        = 'throw';
     this._docHeader         = [];
+    this._headerGroups      = [];
     this._showTotalRows     = false;
     this._resolvedTotalRows = null;
   }
@@ -556,6 +558,43 @@ class SheetConfig {
    * ])
    */
   docHeader(rows: DocHeaderRow[]): this { this._docHeader = rows; return this; }
+
+  /**
+   * Multi-level column header rows written immediately above the column header row.
+   * Uses the same `DocHeaderRow` format as `.docHeader()` — supports `mergeAcross`,
+   * `mergeDown`, and per-cell styles. Cells blocked by `mergeDown` from a previous row
+   * are skipped automatically.
+   *
+   * The column header row (and freeze / autoFilter) is placed after all group rows,
+   * so `freezeHeader` and `autoFilter` still target the correct row.
+   *
+   * @example
+   * s.headerGroups([
+   *   {
+   *     columns: [
+   *       { text: 'No.',     mergeDown: 2, style: { bold: true, align: 'center' } },
+   *       { text: 'Kode BA', mergeDown: 2, style: { bold: true, align: 'center' } },
+   *       { text: 'Uraian',  mergeDown: 2, style: { bold: true, align: 'center' } },
+   *       { text: 'PER 31 DESEMBER 2025', mergeAcross: 7, style: { bold: true, align: 'center' } },
+   *     ],
+   *   },
+   *   {
+   *     columns: [
+   *       { text: 'Persediaan', mergeAcross: 3, style: { bold: true, align: 'center' } },
+   *       { text: 'Tanah*',     mergeAcross: 3, style: { bold: true, align: 'center' } },
+   *     ],
+   *   },
+   *   {
+   *     columns: [
+   *       { text: 'TA 2025 (Audited)' }, { text: 'TA 2024 (Audited)' },
+   *       { text: 'Kenaikan/(Penurunan)' }, { text: '% Kenaikan/(Penurunan)' },
+   *       { text: 'TA 2025 (Audited)' }, { text: 'TA 2024 (Audited)' },
+   *       { text: 'Kenaikan/(Penurunan)' }, { text: '% Kenaikan/(Penurunan)' },
+   *     ],
+   *   },
+   * ])
+   */
+  headerGroups(rows: DocHeaderRow[]): this { this._headerGroups = rows; return this; }
 
   /**
    * Prepend a row count summary above the table header on every sheet (including splits).
@@ -941,7 +980,7 @@ class OracleSqlToExcelBuilder {
       // Doc header: first sheet only (not on split continuations)
       if (sheetIndex === 0 && sheetCfg._docHeader?.length > 0) {
         dbg(`  docHeader: ${sheetCfg._docHeader.length} row(s)`);
-        prependedRows = writeDocHeaderRows(worksheet, sheetCfg._docHeader, colCount);
+        prependedRows = writeMergedRows(worksheet, sheetCfg._docHeader, colCount);
         dbg(`  docHeader done — prependedRows=${prependedRows}`);
       }
 
@@ -974,6 +1013,11 @@ class OracleSqlToExcelBuilder {
       }
 
       if (resolvedColDefs) {
+        if (sheetCfg._headerGroups.length > 0) {
+          prependedRows += writeMergedRows(worksheet, sheetCfg._headerGroups, colCount);
+          dbg(`  headerGroups written (${sheetCfg._headerGroups.length} rows)`);
+        }
+
         const headerRowNum = prependedRows + 1;
         dbg(`  headerRowNum=${headerRowNum}`);
 
@@ -1167,7 +1211,7 @@ class OracleSqlToExcelBuilder {
       let prependedRows = 0;
       if (resolvedColDefs) worksheet.columns = buildColumnSpec(resolvedColDefs);
       if (sheetIndex === 0 && sheetCfg._docHeader?.length > 0) {
-        prependedRows = writeDocHeaderRows(worksheet, sheetCfg._docHeader, colCount);
+        prependedRows = writeMergedRows(worksheet, sheetCfg._docHeader, colCount);
       }
       if (sheetIndex === 0 && prevFileNote) {
         const noteRow = worksheet.addRow([prevFileNote]);
@@ -1215,6 +1259,10 @@ class OracleSqlToExcelBuilder {
         }
       }
       if (resolvedColDefs) {
+        if (sheetCfg._headerGroups.length > 0) {
+          prependedRows += writeMergedRows(worksheet, sheetCfg._headerGroups, colCount);
+        }
+
         const headerRowNum = prependedRows + 1;
         if (sheetCfg._freezeHeader) worksheet.views.splice(0, worksheet.views.length, { state: 'frozen', ySplit: headerRowNum });
         if (sheetCfg._autoFilter) {
@@ -1999,7 +2047,7 @@ function escapeCsvField(value: string, separator: string): string {
 }
 
 /** @private */
-function writeCsvDocHeader(rows: DocHeaderRow[], sep: string, stream: Writable): void {
+function writeCsvHeaderRows(rows: DocHeaderRow[], sep: string, stream: Writable): void {
   for (const row of rows) {
     if (Array.isArray(row.columns)) {
       stream.write(row.columns.map((c) => escapeCsvField(c.text ?? '', sep)).join(sep) + '\n');
@@ -2227,7 +2275,7 @@ class OracleSqlToCsvBuilder {
 
       // Write BOM + doc header + column header
       if (this._withBom) stream.write('﻿');
-      if (this._docHeader.length > 0) writeCsvDocHeader(this._docHeader, this._separator, stream);
+      if (this._docHeader.length > 0) writeCsvHeaderRows(this._docHeader, this._separator, stream);
       stream.write(cols.map((c) => escapeCsvField(c.header ?? c.key, this._separator)).join(this._separator) + '\n');
 
       // Pre-compute separator and key array once — avoids repeated property lookups in the hot loop
@@ -2334,7 +2382,7 @@ class OracleSqlToCsvBuilder {
       outer: while (true) {
         const { stream, finalize } = await getStream(fileCount++);
         if (this._withBom) stream.write('﻿');
-        if (this._docHeader.length > 0) writeCsvDocHeader(this._docHeader, sep, stream);
+        if (this._docHeader.length > 0) writeCsvHeaderRows(this._docHeader, sep, stream);
         stream.write(headerLine);
 
         let fileRows = 0;
