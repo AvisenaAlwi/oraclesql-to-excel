@@ -147,11 +147,13 @@ describe('OracleSqlToCsv — run()', () => {
 
   it('writes file to disk and returns path + rowsWritten', async () => {
     const filepath = path.join(tmpDir, 'out.csv');
-    const { success, file, rowsWritten } = await OracleSqlToCsv()
+    const _r = await OracleSqlToCsv()
       .connectionFactory(makeConn(ROWS))
       .sql('SELECT * FROM T')
       .columns(COLS)
       .run(filepath);
+    const { success, rowsWritten } = _r;
+    const file = 'file' in _r ? _r.file : undefined;
 
     expect(success).toBe(true);
     expect(file).toBe(filepath);
@@ -196,5 +198,110 @@ describe('OracleSqlToCsv — pipe()', () => {
     const rows = parseCsv(text);
     expect(rows[0]).toEqual(['ID', 'Name']);
     expect(rows).toHaveLength(3); // header + 2 data rows
+  });
+});
+
+// ── transform ─────────────────────────────────────────────────────────────────
+
+describe('OracleSqlToCsv — transform', () => {
+  async function csvToString(
+    builder: ReturnType<typeof OracleSqlToCsv>
+  ): Promise<string> {
+    const { buffer } = await builder.withBom(false).toBuffer();
+    return buffer.toString('utf8');
+  }
+
+  it('per-column transform applied to raw Oracle value', async () => {
+    const rows = [{ STATUS: 'Y' }, { STATUS: 'N' }];
+    const cols = [{
+      key      : 'STATUS',
+      transform: (val: unknown) => val === 'Y' ? 'Active' : 'Inactive',
+    }];
+
+    const csv = await csvToString(
+      OracleSqlToCsv()
+        .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'STATUS' }])))
+        .sql('SELECT STATUS FROM T')
+        .columns(cols)
+    );
+
+    const dataRows = csv.trim().split('\n').slice(1);
+    expect(dataRows[0]).toBe('Active');
+    expect(dataRows[1]).toBe('Inactive');
+  });
+
+  it('per-row transform appends computed column', async () => {
+    const rows = [{ A: 'foo', B: 'bar' }];
+    const cols = [{ key: 'A' }, { key: 'B' }, { key: 'C' }];
+
+    const csv = await csvToString(
+      OracleSqlToCsv()
+        .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'A' }, { name: 'B' }])))
+        .sql('SELECT A, B FROM T')
+        .columns(cols)
+        .transform((row) => ({ ...row, C: `${row['A']}-${row['B']}` }))
+    );
+
+    expect(csv).toContain('foo-bar');
+  });
+
+  it('per-row transform receives row after per-column transforms', async () => {
+    const rows = [{ FLAG: 'Y' }];
+    const cols = [
+      { key: 'FLAG', transform: (val: unknown) => val === 'Y' ? 'yes' : 'no' },
+      { key: 'LABEL' },
+    ];
+
+    const csv = await csvToString(
+      OracleSqlToCsv()
+        .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'FLAG' }])))
+        .sql('SELECT FLAG FROM T')
+        .columns(cols)
+        .transform((row) => ({ ...row, LABEL: `flag=${row['FLAG']}` }))
+    );
+
+    const dataRows = csv.trim().split('\n').slice(1);
+    expect(dataRows[0]).toBe('yes,flag=yes');
+  });
+
+  it('warns once in dev when CSV transform returns Promise', async () => {
+    const origEnv = process.env.NODE_ENV;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      process.env.NODE_ENV = 'development';
+      const rows = [{ A: '1' }, { A: '2' }, { A: '3' }];
+      const cols = [{ key: 'A', transform: async (val: unknown) => String(val).toUpperCase() }];
+
+      await OracleSqlToCsv()
+        .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'A' }])))
+        .sql('SELECT A FROM T')
+        .columns(cols)
+        .withBom(false)
+        .toBuffer();
+
+      const asyncWarns = warnSpy.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].includes('transform returned a Promise')
+      );
+      expect(asyncWarns).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+      process.env.NODE_ENV = origEnv;
+    }
+  });
+
+  it('async CSV transform produces correct values', async () => {
+    const rows = [{ V: 'x' }, { V: 'y' }];
+    const cols = [{ key: 'V', transform: async (val: unknown) => String(val).toUpperCase() }];
+
+    const csv = await csvToString(
+      OracleSqlToCsv()
+        .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'V' }])))
+        .sql('SELECT V FROM T')
+        .columns(cols)
+    );
+
+    const dataRows = csv.trim().split('\n').slice(1);
+    expect(dataRows[0]).toBe('X');
+    expect(dataRows[1]).toBe('Y');
   });
 });

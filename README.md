@@ -14,6 +14,7 @@ Stream Oracle SQL query results directly into Excel (`.xlsx`) or CSV files with 
 - **Row range summary** — "Showing rows X – Y of Z total" auto-prepended per sheet via a parallel COUNT query
 - **Auto-filter & freeze header** — one method call each
 - **Per-column formatting** — number formats, alignment, wrap text, font/bg colors
+- **Transform** — per-column and per-row value transforms on both Excel and CSV; sync or async
 
 ---
 
@@ -151,6 +152,7 @@ Received as argument `s` inside the `.sheet(name, fn)` callback.
 | `.headerGroups(rows)` | none | Multi-level grouped header rows written immediately above the column header. Supports `mergeAcross` and `mergeDown`. See [Multi-Level Column Header](#multi-level-column-header-headergroups). |
 | `.showTotalRows()` | off | Prepend "Showing rows X – Y of Z total". Runs COUNT in parallel. |
 | `.onRowError(mode)` | `'throw'` | `'throw'` aborts on first bad row. `'skip'` drops it and continues. |
+| `.transform(fn)` | none | Per-row value transform. Receives the assembled row (after all per-column transforms) and must return a new row object. See [Transform](#transform). |
 
 ---
 
@@ -177,13 +179,14 @@ Unlike Excel, CSV writes each row directly to the output stream with no intermed
 |--------|---------|-------------|
 | `.connectionFactory(fn)` | — | **Required.** `fn` must return `Promise<Connection>`. |
 | `.sql(query, params, opts)` | — | **Required.** Oracle SQL with optional bind parameters and execute options. |
-| `.columns(defs)` | auto-detect | Array of `{ key, header }`. Omit to auto-detect from Oracle metadata. |
+| `.columns(defs)` | auto-detect | Array of `{ key, header, transform? }`. Omit to auto-detect from Oracle metadata. |
 | `.fetchSize(n)` | `50_000` | Rows fetched per Oracle round-trip. |
 | `.separator(char)` | `','` | Field separator. Use `';'` for European Excel, `'\t'` for TSV. |
 | `.withBom(bool)` | `true` | Prepend UTF-8 BOM so Windows Excel opens the file with correct encoding. |
 | `.docHeader(rows)` | none | Rows prepended above the column header on every file. Only `text` and `columns[].text` are written — style and merge are ignored in CSV. |
 | `.locale(tag)` | `'en-US'` | BCP 47 locale tag for number formatting (e.g. `'id-ID'` → `1.000.000`). |
 | `.onProgress(cb)` | — | Called after each fetch batch with `{ rowsWritten }`. |
+| `.transform(fn)` | none | Per-row value transform. Receives the assembled row (after all per-column transforms) and must return a new row object. See [Transform](#transform). |
 
 #### Terminal methods
 
@@ -208,10 +211,11 @@ Unlike Excel, CSV writes each row directly to the output stream with no intermed
   wrapText  : false,                  // Enable text wrap                          (Excel only)
   bgColor   : 'FFFF00',               // Cell background color (hex)               (Excel only)
   fontColor : 'FF0000',               // Cell font color (hex)                     (Excel only)
+  transform : (value, rawRow) => ..., // Value transform function (Excel and CSV)
 }
 ```
 
-For CSV, only `key` and `header` are used.
+For CSV, only `key`, `header`, and `transform` are used. All other fields are Excel-only.
 
 **Type notes (Excel):**
 - `number` — values with > 15 significant digits are cast to string to prevent Excel precision loss.
@@ -622,6 +626,95 @@ OracleSqlToCsv().separator('\t')
 
 // No BOM — for non-Windows consumers
 OracleSqlToCsv().withBom(false)
+```
+
+---
+
+### Transform
+
+Transform cell values — map status codes, format strings, compute derived columns — without touching your SQL. Works on both Excel and CSV.
+
+#### Per-column transform (Excel)
+
+`transform` in `ColumnDef` receives the value **after** `castCell` (already typed for Excel) and the original raw DB row. Return value is written directly to the cell.
+
+```js
+s.columns([
+  {
+    key      : 'STATUS',
+    header   : 'Status',
+    transform: (val) => val === 'Y' ? 'Active' : 'Inactive',
+  },
+  {
+    key      : 'AMOUNT',
+    header   : 'Amount',
+    type     : 'number',
+    numFmt   : '#,##0.00',
+    transform: (val) => (val as number) * 1.1,   // +10%
+  },
+])
+```
+
+#### Per-column transform (CSV)
+
+Same API. In CSV the value is the **raw Oracle value** (no castCell step).
+
+```js
+OracleSqlToCsv()
+  .columns([
+    { key: 'STATUS', transform: (val) => val === 'Y' ? 'Active' : 'Inactive' },
+    { key: 'AMOUNT' },
+  ])
+```
+
+#### Per-row transform (Excel and CSV)
+
+`.transform(fn)` on `SheetConfig` (Excel) or `OracleSqlToCsvBuilder` (CSV) receives the assembled row **after** all per-column transforms. Use it to add computed columns or cross-column logic.
+
+```js
+// Excel — compute FULL_NAME from two columns
+s.columns([
+  { key: 'FIRST_NAME' },
+  { key: 'LAST_NAME'  },
+  { key: 'AMOUNT', type: 'number' },
+  { key: 'FULL_NAME' },   // populated by transform
+])
+.transform((row) => ({
+  ...row,
+  FULL_NAME: `${row.FIRST_NAME} ${row.LAST_NAME}`,
+}))
+```
+
+```js
+// CSV — same pattern
+OracleSqlToCsv()
+  .columns([{ key: 'A' }, { key: 'B' }, { key: 'C' }])
+  .transform((row) => ({ ...row, C: `${row.A}-${row.B}` }))
+```
+
+#### Async transforms
+
+Both per-column and per-row transforms may return a `Promise`. The library `await`s the result.
+
+```js
+.transform(async (row) => ({
+  ...row,
+  ENRICHED: await fetchFromCache(row.ID),
+}))
+```
+
+> **Warning:** Async transforms run per-row and add one `await` per row. For exports with millions of rows this can significantly slow down the export. A warning is logged once per unique transform key in non-production environments (`NODE_ENV` not `production` or `prod`).
+
+#### `rawRow` argument
+
+Per-column `transform` receives the original DB row as its second argument — useful when the transformed value depends on another column:
+
+```js
+{
+  key      : 'AMOUNT',
+  type     : 'number',
+  transform: (val, rawRow) => rawRow.CURRENCY === 'USD' ? (val as number) * 1000 : val,
+}
 ```
 
 ---

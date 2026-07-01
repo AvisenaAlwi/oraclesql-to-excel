@@ -78,6 +78,8 @@ export interface ColumnDef {
   bgColor?  : string;
   /** Font color hex, e.g. `'FF0000'` or `'#FF0000'`. */
   fontColor?: string;
+  /** Optional value transformer. Called after `castCell`; return value written to cell directly. */
+  transform?: (value: unknown, rawRow: Record<string, unknown>) => unknown;
 }
 
 /**
@@ -280,7 +282,9 @@ function writeHeaderRow(
     } as ExcelJS.Fill;
   }
   if (headerStyle?.align) {
-    row.alignment = { horizontal: headerStyle.align, vertical: 'middle' };
+    colDefs.forEach((_, i) => {
+      row.getCell(i + 1).alignment = { horizontal: headerStyle!.align!, vertical: 'middle' };
+    });
   }
 
   row.commit();
@@ -381,8 +385,10 @@ function writeMergedRows(
         const mergeDown   = cellDef.mergeDown   ?? 0;
         const endCol      = col + mergeAcross;
 
-        row.getCell(col).value = cellDef.text ?? '';
-        applyDocHeaderCellStyle(row.getCell(col), cellDef.style);
+        const cell = row.getCell(col);
+        cell.value     = cellDef.text ?? '';
+        cell.alignment = { horizontal: 'left' };  // default; overridden by style.align if set
+        applyDocHeaderCellStyle(cell, cellDef.style);
 
         if (mergeAcross > 0 || mergeDown > 0) {
           ws.mergeCells(actualNum, col, actualNum + mergeDown, endCol);
@@ -399,8 +405,10 @@ function writeMergedRows(
       }
     } else {
       // ── Simple mode (single text, full-width merge or merge=false) ────────────
-      row.getCell(1).value = docHeaderRow.text ?? '';
-      applyDocHeaderCellStyle(row.getCell(1), docHeaderRow.style);
+      const cell1 = row.getCell(1);
+      cell1.value     = docHeaderRow.text ?? '';
+      cell1.alignment = { horizontal: 'left' };  // default; overridden by style.align if set
+      applyDocHeaderCellStyle(cell1, docHeaderRow.style);
 
       if ((docHeaderRow.merge ?? true) && colCount > 1) {
         ws.mergeCells(actualNum, 1, actualNum, colCount);
@@ -423,6 +431,79 @@ function resolveSheetName(sheetName: string | string[], index: number): string {
     return `${base} ${suffix}`;
   }
   return index === 0 ? sheetName : `${sheetName} ${index + 1}`;
+}
+
+/**
+ * Apply per-column and per-row transforms to a single row.
+ * Per-column: called after castCell; return value written directly.
+ * Per-row: called with fully-transformed rowData; result replaces rowData.
+ * Async transforms are awaited; warnAsync is called once per label on first detection.
+ * @private
+ */
+async function applyExcelTransforms(
+  colDefs   : ColumnDef[],
+  rawRow    : Record<string, unknown>,
+  rowFn     : ((row: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>) | null,
+  warnAsync : (label: string) => void
+): Promise<Record<string, unknown>> {
+  const rowData: Record<string, unknown> = {};
+  for (const colDef of colDefs) {
+    const { key, type = 'text', transform } = colDef;
+    const casted = castCell(rawRow[key], type);
+    if (transform) {
+      const result = transform(casted, rawRow);
+      if (result instanceof Promise) {
+        warnAsync(`Column "${key}"`);
+        rowData[key] = await result;
+      } else {
+        rowData[key] = result;
+      }
+    } else {
+      rowData[key] = casted;
+    }
+  }
+  if (!rowFn) return rowData;
+  const rowResult = rowFn(rowData);
+  if (rowResult instanceof Promise) {
+    warnAsync('Row');
+    return await rowResult;
+  }
+  return rowResult;
+}
+
+/**
+ * Apply per-column and per-row transforms to a CSV row.
+ * No castCell — transform receives the raw Oracle value.
+ * Returns rawRow unchanged when no transforms are defined (fast path).
+ * @private
+ */
+async function applyCsvTransforms(
+  cols      : Pick<ColumnDef, 'key' | 'header' | 'transform'>[],
+  rawRow    : Record<string, unknown>,
+  rowFn     : ((row: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>) | null,
+  warnAsync : (label: string) => void
+): Promise<Record<string, unknown>> {
+  const rowData: Record<string, unknown> = {};
+  for (const col of cols) {
+    if (col.transform) {
+      const result = col.transform(rawRow[col.key], rawRow);
+      if (result instanceof Promise) {
+        warnAsync(`Column "${col.key}"`);
+        rowData[col.key] = await result;
+      } else {
+        rowData[col.key] = result;
+      }
+    } else {
+      rowData[col.key] = rawRow[col.key];
+    }
+  }
+  if (!rowFn) return rowData;
+  const rowResult = rowFn(rowData);
+  if (rowResult instanceof Promise) {
+    warnAsync('Row');
+    return await rowResult;
+  }
+  return rowResult;
 }
 
 // ── SheetConfig ───────────────────────────────────────────────────────────────
@@ -459,6 +540,7 @@ class SheetConfig {
   /** @private */ _headerGroups     : DocHeaderRow[];
   /** @private */ _showTotalRows    : boolean;
   /** @private */ _resolvedTotalRows: number | null;
+  /** @private */ _transform        : ((row: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>) | null;
 
   constructor(name: string | string[]) {
     this._name              = name;
@@ -476,6 +558,7 @@ class SheetConfig {
     this._headerGroups      = [];
     this._showTotalRows     = false;
     this._resolvedTotalRows = null;
+    this._transform         = null;
   }
 
   /**
@@ -504,8 +587,8 @@ class SheetConfig {
   }
 
   /**
-   * Column definitions. When omitted, all DB columns are written using their Oracle key names as headers.
-   * @param value - OPTIONAL. Default: all DB columns auto-detected from Oracle metadata.
+   * Column definitions. Only `key`, `header`, and `transform` are used for CSV (no type, style, or format).
+   * Omit to auto-detect columns from Oracle metadata in their SELECT order.
    */
   columns(value: ColumnDef[]): this { this._columns = value; return this; }
 
@@ -633,6 +716,21 @@ class SheetConfig {
    * @param value - OPTIONAL. Default when called without argument: `true`.
    */
   showTotalRows(value = true): this { this._showTotalRows = value; return this; }
+
+  /**
+   * Row-level transform called after all per-column transforms.
+   * Receives the full processed row; return value is written to the sheet.
+   * Supports async but sync is strongly preferred for large exports.
+   *
+   * @example
+   * s.transform((row) => ({ ...row, FULL_NAME: `${row.FIRST} ${row.LAST}` }))
+   */
+  transform(
+    fn: (row: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+  ): this {
+    this._transform = fn;
+    return this;
+  }
 }
 
 // ── FileConfig ────────────────────────────────────────────────────────────────
@@ -1012,6 +1110,7 @@ class OracleSqlToExcelBuilder {
         dbg(`  prevInfo: "Continued from sheet: ${prevName}"`);
         const prevRow = worksheet.addRow([`Continued from sheet: ${prevName}`]);
         prevRow.font  = { italic: true, color: { argb: 'FF808080' } };
+        prevRow.getCell(1).alignment = { horizontal: 'left' };
         if (colCount > 1) worksheet.mergeCells(prevRow.number, 1, prevRow.number, colCount);
         prevRow.commit();
         prependedRows++;
@@ -1029,6 +1128,7 @@ class OracleSqlToExcelBuilder {
         dbg(`  rangeInfo: "${text}"`);
         const rangeRow = worksheet.addRow([text]);
         rangeRow.font  = { italic: true, color: { argb: 'FF404040' } };
+        rangeRow.getCell(1).alignment = { horizontal: 'left' };
         if (colCount > 1) worksheet.mergeCells(rangeRow.number, 1, rangeRow.number, colCount);
         rangeRow.commit();
         prependedRows++;
@@ -1123,17 +1223,24 @@ class OracleSqlToExcelBuilder {
       let rows = await resultSet!.getRows(sheetCfg._fetchSize);
       dbg(`getRows → ${rows.length} row(s)`);
 
+      const warnedTransforms = new Set<string>();
+      const warnAsync = (label: string): void => {
+        if (!isDevEnv || warnedTransforms.has(label)) return;
+        warnedTransforms.add(label);
+        console.warn(
+          `[OracleSqlToExcel] WARNING — ${label} transform returned a Promise. ` +
+          'Async transforms run per-row and may significantly slow large exports.'
+        );
+      };
+
       while (rows.length > 0) {
         const batchRowsBefore = totalRows;
 
         for (const row of rows) {
           let rowWritten = false;
           try {
-            const rowData: Record<string, unknown> = {};
-            resolvedColDefs!.forEach(({ key, type = 'text' }) => {
-              rowData[key] = castCell(row[key], type);
-            });
-            worksheet.addRow(rowData).commit();
+            const finalRow = await applyExcelTransforms(resolvedColDefs!, row, sheetCfg._transform, warnAsync);
+            worksheet.addRow(finalRow).commit();
             rowWritten = true;
           } catch (rowErr) {
             const msg = rowErr instanceof Error ? rowErr.message : String(rowErr);
@@ -1154,6 +1261,7 @@ class OracleSqlToExcelBuilder {
               worksheet.addRow(['']).commit();
               const infoRow = worksheet.addRow([`Continued on sheet: ${nextSheetName}`]);
               infoRow.font  = { italic: true, color: { argb: 'FF404040' } };
+              infoRow.getCell(1).alignment = { horizontal: 'left' };
               if (colCount > 1) worksheet.mergeCells(infoRow.number, 1, infoRow.number, colCount);
               infoRow.commit();
 
@@ -1238,6 +1346,7 @@ class OracleSqlToExcelBuilder {
       if (sheetIndex === 0 && prevFileNote) {
         const noteRow = worksheet.addRow([prevFileNote]);
         noteRow.font  = { italic: true, color: { argb: 'FF808080' } };
+        noteRow.getCell(1).alignment = { horizontal: 'left' };
         if (colCount > 1) worksheet.mergeCells(noteRow.number, 1, noteRow.number, colCount);
         noteRow.commit();
         prependedRows++;
@@ -1246,6 +1355,7 @@ class OracleSqlToExcelBuilder {
         const prevName = resolveSheetName(sheetCfg._name, sheetIndex - 1);
         const prevRow  = worksheet.addRow([`Continued from sheet: ${prevName}`]);
         prevRow.font   = { italic: true, color: { argb: 'FF808080' } };
+        prevRow.getCell(1).alignment = { horizontal: 'left' };
         if (colCount > 1) worksheet.mergeCells(prevRow.number, 1, prevRow.number, colCount);
         prevRow.commit();
         prependedRows++;
@@ -1256,6 +1366,7 @@ class OracleSqlToExcelBuilder {
         const addRangeRow = (text: string): void => {
           const row = worksheet.addRow([text]);
           row.font  = { italic: true, color: { argb: 'FF404040' } };
+          row.getCell(1).alignment = { horizontal: 'left' };
           if (colCount > 1) worksheet.mergeCells(row.number, 1, row.number, colCount);
           row.commit();
           prependedRows++;
@@ -1297,6 +1408,7 @@ class OracleSqlToExcelBuilder {
 
     try {
       const sheetLabel = Array.isArray(sheetCfg._name) ? sheetCfg._name[0] : sheetCfg._name;
+      const isDevEnv   = !['production', 'prod'].includes((process.env.NODE_ENV ?? '').toLowerCase());
 
       if (existingRS) {
         resultSet = existingRS;
@@ -1320,6 +1432,16 @@ class OracleSqlToExcelBuilder {
 
       let rows = pendingRows.length > 0 ? pendingRows : await resultSet!.getRows(sheetCfg._fetchSize);
 
+      const warnedTransforms = new Set<string>();
+      const warnAsync = (label: string): void => {
+        if (!isDevEnv || warnedTransforms.has(label)) return;
+        warnedTransforms.add(label);
+        console.warn(
+          `[OracleSqlToExcel] WARNING — ${label} transform returned a Promise. ` +
+          'Async transforms run per-row and may significantly slow large exports.'
+        );
+      };
+
       while (rows.length > 0) {
         const batchRowsBefore = totalRows;
 
@@ -1333,9 +1455,8 @@ class OracleSqlToExcelBuilder {
           const row = rows[i];
           let rowWritten = false;
           try {
-            const rowData: Record<string, unknown> = {};
-            resolvedColDefs!.forEach(({ key, type = 'text' }) => { rowData[key] = castCell(row[key], type); });
-            worksheet.addRow(rowData).commit();
+            const finalRow = await applyExcelTransforms(resolvedColDefs!, row, sheetCfg._transform, warnAsync);
+            worksheet.addRow(finalRow).commit();
             rowWritten = true;
           } catch (rowErr) {
             if (sheetCfg._onRowError === 'throw') throw rowErr;
@@ -1353,6 +1474,7 @@ class OracleSqlToExcelBuilder {
               worksheet.addRow(['']).commit();
               const infoRow = worksheet.addRow([`Continued on sheet: ${nextSheetName}`]);
               infoRow.font  = { italic: true, color: { argb: 'FF404040' } };
+              infoRow.getCell(1).alignment = { horizontal: 'left' };
               if (colCount > 1) worksheet.mergeCells(infoRow.number, 1, infoRow.number, colCount);
               infoRow.commit();
               await worksheet.commit();
@@ -1378,6 +1500,7 @@ class OracleSqlToExcelBuilder {
         worksheet.addRow(['']).commit();
         const noteRow = worksheet.addRow([nextFileNote]);
         noteRow.font  = { italic: true, color: { argb: 'FF404040' } };
+        noteRow.getCell(1).alignment = { horizontal: 'left' };
         if (colCount > 1) worksheet.mergeCells(noteRow.number, 1, noteRow.number, colCount);
         noteRow.commit();
       }
@@ -2112,7 +2235,7 @@ class OracleSqlToCsvBuilder {
   /** @private */ private _sql               : string;
   /** @private */ private _param             : Record<string, unknown>;
   /** @private */ private _executeOptions    : Record<string, unknown>;
-  /** @private */ private _columns           : Pick<ColumnDef, 'key' | 'header'>[];
+  /** @private */ private _columns           : Pick<ColumnDef, 'key' | 'header' | 'transform'>[];
   /** @private */ private _fetchSize         : number;
   /** @private */ private _separator         : string;
   /** @private */ private _withBom           : boolean;
@@ -2124,6 +2247,7 @@ class OracleSqlToCsvBuilder {
   /** @private */ private _filePrefix        : string;
   /** @private */ private _locale            : string;
   /** @private */ private _docHeader         : DocHeaderRow[];
+  /** @private */ private _transform         : ((row: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>) | null;
 
   constructor() {
     this._connectionFactory = null;
@@ -2142,6 +2266,7 @@ class OracleSqlToCsvBuilder {
     this._filePrefix        = 'export';
     this._locale            = 'en-US';
     this._docHeader         = [];
+    this._transform         = null;
   }
 
   /**
@@ -2169,7 +2294,7 @@ class OracleSqlToCsvBuilder {
    * Column definitions. Only `key` and `header` are used for CSV (no type, style, or format).
    * Omit to auto-detect columns from Oracle metadata in their SELECT order.
    */
-  columns(value: Pick<ColumnDef, 'key' | 'header'>[]): this { this._columns = value; return this; }
+  columns(value: Pick<ColumnDef, 'key' | 'header' | 'transform'>[]): this { this._columns = value; return this; }
 
   /**
    * Rows fetched from Oracle per round-trip. Default: `50_000`.
@@ -2249,6 +2374,21 @@ class OracleSqlToCsvBuilder {
   docHeader(rows: DocHeaderRow[]): this { this._docHeader = rows; return this; }
 
   /**
+   * Row-level transform called after per-column transforms.
+   * Receives the full processed row; return value is written to CSV.
+   * Supports async but sync is strongly preferred for large exports.
+   *
+   * @example
+   * .transform((row) => ({ ...row, FULL: `${row.A}-${row.B}` }))
+   */
+  transform(
+    fn: (row: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+  ): this {
+    this._transform = fn;
+    return this;
+  }
+
+  /**
    * BCP 47 locale tag used to format numbers. Default: `'en-US'`.
    * @example
    * .locale('id-ID')  // → 1.000.000
@@ -2281,7 +2421,7 @@ class OracleSqlToCsvBuilder {
       resultSet = execResult.resultSet ?? null;
 
       // Resolve columns: explicit → metadata → first-row sniff
-      let cols: Pick<ColumnDef, 'key' | 'header'>[];
+      let cols: Pick<ColumnDef, 'key' | 'header' | 'transform'>[];
       let prefetchedRows: Record<string, unknown>[] = [];
 
       if (this._columns.length > 0) {
@@ -2295,6 +2435,18 @@ class OracleSqlToCsvBuilder {
         prefetchedRows = firstRows;
       }
 
+      const hasTransforms       = cols.some((c) => !!c.transform) || !!this._transform;
+      const isDevEnv            = !['production', 'prod'].includes((process.env.NODE_ENV ?? '').toLowerCase());
+      const warnedCsvTransforms = new Set<string>();
+      const warnAsync = (label: string): void => {
+        if (!isDevEnv || warnedCsvTransforms.has(label)) return;
+        warnedCsvTransforms.add(label);
+        console.warn(
+          `[OracleSqlToCsv] WARNING — ${label} transform returned a Promise. ` +
+          'Async transforms run per-row and may significantly slow large exports.'
+        );
+      };
+
       // Write BOM + doc header + column header
       if (this._withBom) stream.write('﻿');
       if (this._docHeader.length > 0) writeCsvHeaderRows(this._docHeader, this._separator, stream);
@@ -2307,12 +2459,15 @@ class OracleSqlToCsvBuilder {
 
       // Build one string per batch via direct concatenation — avoids per-row array allocation
       // that cols.map(...).join() would produce (N×M intermediate arrays per batch).
-      const writeRows = (rows: Record<string, unknown>[]): void => {
+      const writeRows = async (rows: Record<string, unknown>[]): Promise<void> => {
         let out = '';
         for (const row of rows) {
+          const finalRow = hasTransforms
+            ? await applyCsvTransforms(cols, row, this._transform, warnAsync)
+            : row;
           for (let i = 0; i < n; i++) {
             if (i > 0) out += sep;
-            out += escapeCsvField(String(row[keys[i]] ?? ''), sep);
+            out += escapeCsvField(String(finalRow[keys[i]] ?? ''), sep);
           }
           out += '\n';
         }
@@ -2320,14 +2475,14 @@ class OracleSqlToCsvBuilder {
       };
 
       if (prefetchedRows.length > 0) {
-        writeRows(prefetchedRows);
+        await writeRows(prefetchedRows);
         rowsWritten += prefetchedRows.length;
         if (this._onProgressCb) this._onProgressCb({ rowsWritten });
       }
 
       let rows = await resultSet!.getRows(this._fetchSize);
       while (rows.length > 0) {
-        writeRows(rows);
+        await writeRows(rows);
         rowsWritten += rows.length;
         if (this._onProgressCb) this._onProgressCb({ rowsWritten });
         rows = await resultSet!.getRows(this._fetchSize);
@@ -2375,7 +2530,7 @@ class OracleSqlToCsvBuilder {
       resultSet = execResult.resultSet ?? null;
 
       // Resolve columns once — reused for every file segment
-      let cols: Pick<ColumnDef, 'key' | 'header'>[];
+      let cols: Pick<ColumnDef, 'key' | 'header' | 'transform'>[];
       let carry: Record<string, unknown>[] = [];
 
       if (this._columns.length > 0) {
@@ -2393,6 +2548,18 @@ class OracleSqlToCsvBuilder {
         cols  = Object.keys(peek[0]).map((k) => ({ key: k, header: k }));
         carry = peek;
       }
+
+      const hasTransforms       = cols.some((c) => !!c.transform) || !!this._transform;
+      const isDevEnv            = !['production', 'prod'].includes((process.env.NODE_ENV ?? '').toLowerCase());
+      const warnedCsvTransforms = new Set<string>();
+      const warnAsync = (label: string): void => {
+        if (!isDevEnv || warnedCsvTransforms.has(label)) return;
+        warnedCsvTransforms.add(label);
+        console.warn(
+          `[OracleSqlToCsv] WARNING — ${label} transform returned a Promise. ` +
+          'Async transforms run per-row and may significantly slow large exports.'
+        );
+      };
 
       const sep        = this._separator;
       const keys       = cols.map((c) => c.key);
@@ -2417,11 +2584,14 @@ class OracleSqlToCsvBuilder {
 
           for (let i = 0; i < batch.length; i++) {
             if (fileRows >= maxRows) {
-              carry = batch.slice(i);  // carry remaining rows to next file
+              carry = batch.slice(i);
               limit = true;
               break;
             }
-            const row = batch[i];
+            const rawRow = batch[i];
+            const row = hasTransforms
+              ? await applyCsvTransforms(cols, rawRow, this._transform, warnAsync)
+              : rawRow;
             for (let c = 0; c < n; c++) {
               if (c > 0) out += sep;
               out += escapeCsvField(String(row[keys[c]] ?? ''), sep);
@@ -2533,7 +2703,7 @@ class OracleSqlToCsvBuilder {
     const result = await this._execute(stream);
     if (!stream.writableEnded) stream.end();
     await done.catch(() => {});
-    if (!result.success) fs.promises.unlink(filepath).catch(() => {});
+    if (!result.success) await fs.promises.unlink(filepath).catch(() => {});
     return { ...result, file: filepath };
   }
 

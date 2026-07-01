@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4.0] - 2026-07-01
+
+### Added
+
+- **`.transform(fn)` on `SheetConfig` (Excel)** — per-row value transform. Receives the assembled row after all per-column transforms and must return a new row object. Supports async (returns `Promise`). A dev-only warning is logged once per transform key when a `Promise` is detected (`NODE_ENV` not `production`/`prod`).
+- **`.transform(fn)` on `OracleSqlToCsvBuilder`** — same per-row transform API as Excel, applied in the CSV write path.
+- **`ColumnDef.transform`** — per-column value transform function: `(value, rawRow) => unknown`. For Excel, `value` is the post-`castCell` typed value. For CSV, `value` is the raw Oracle value. The return value is written directly — no re-casting. Supported on both Excel and CSV builders.
+
+---
+
 ## [2.3.2] - 2026-06-04
 
 ### Fixed

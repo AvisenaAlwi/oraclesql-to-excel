@@ -341,3 +341,171 @@ describe('pipe()', () => {
     expect(buffer[1]).toBe(0x4b);
   });
 });
+
+// ── transform ─────────────────────────────────────────────────────────────────
+
+describe('transform — per-column', () => {
+  it('applies sync transform after castCell', async () => {
+    const rows = [{ STATUS: 'Y' }, { STATUS: 'N' }];
+    const cols = [{
+      key      : 'STATUS',
+      type     : 'text' as const,
+      transform: (val: unknown) => val === 'Y' ? 'Aktif' : 'Nonaktif',
+    }];
+
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'STATUS' }])))
+      .sheet('S', (s) => s.sql('SELECT STATUS FROM T').columns(cols))
+      .toBuffer();
+
+    const [{ rows: parsed }] = await readBuffer(buffer);
+    expect(parsed[0][0]).toBe('Aktif');
+    expect(parsed[1][0]).toBe('Nonaktif');
+  });
+
+  it('passes rawRow as second argument', async () => {
+    const rows = [{ A: 'hello', B: 'world' }];
+    const capturedRaw: unknown[] = [];
+    const cols = [
+      {
+        key      : 'A',
+        transform: (val: unknown, rawRow: Record<string, unknown>) => {
+          capturedRaw.push({ ...rawRow });
+          return val;
+        },
+      },
+      { key: 'B' },
+    ];
+
+    await OracleSqlToExcel()
+      .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'A' }, { name: 'B' }])))
+      .sheet('S', (s) => s.sql('SELECT A, B FROM T').columns(cols))
+      .toBuffer();
+
+    expect(capturedRaw[0]).toEqual({ A: 'hello', B: 'world' });
+  });
+
+  it('null raw value passed through transform', async () => {
+    const rows = [{ VAL: null }];
+    const cols = [{ key: 'VAL', transform: (val: unknown) => val === null ? 'N/A' : val }];
+
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'VAL' }])))
+      .sheet('S', (s) => s.sql('SELECT VAL FROM T').columns(cols))
+      .toBuffer();
+
+    const [{ rows: parsed }] = await readBuffer(buffer);
+    expect(parsed[0][0]).toBe('N/A');
+  });
+});
+
+describe('transform — per-row (SheetConfig)', () => {
+  it('computes derived column from multiple raw columns', async () => {
+    const rows = [{ FIRST: 'John', LAST: 'Doe' }];
+    const cols = [
+      { key: 'FIRST' },
+      { key: 'LAST' },
+      { key: 'FULL' },
+    ];
+
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'FIRST' }, { name: 'LAST' }])))
+      .sheet('S', (s) => s
+        .sql('SELECT FIRST, LAST FROM T')
+        .columns(cols)
+        .transform((row) => ({ ...row, FULL: `${row['FIRST']} ${row['LAST']}` }))
+      )
+      .toBuffer();
+
+    const [{ rows: parsed }] = await readBuffer(buffer);
+    expect(parsed[0][2]).toBe('John Doe');
+  });
+
+  it('row transform receives row AFTER per-column transforms', async () => {
+    const rows = [{ STATUS: 'Y' }];
+    const cols = [
+      { key: 'STATUS', transform: (val: unknown) => val === 'Y' ? 'Active' : 'Inactive' },
+      { key: 'LABEL' },
+    ];
+
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'STATUS' }])))
+      .sheet('S', (s) => s
+        .sql('SELECT STATUS FROM T')
+        .columns(cols)
+        .transform((row) => ({ ...row, LABEL: `Status: ${row['STATUS']}` }))
+      )
+      .toBuffer();
+
+    const [{ rows: parsed }] = await readBuffer(buffer);
+    expect(parsed[0][1]).toBe('Status: Active');
+  });
+});
+
+describe('transform — async', () => {
+  it('warns once in dev when per-column transform returns Promise', async () => {
+    const origEnv = process.env.NODE_ENV;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      process.env.NODE_ENV = 'development';
+
+      const rows = [{ A: '1' }, { A: '2' }, { A: '3' }];
+      const cols = [{ key: 'A', transform: async (val: unknown) => String(val).toUpperCase() }];
+
+      await OracleSqlToExcel()
+        .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'A' }])))
+        .sheet('S', (s) => s.sql('SELECT A FROM T').columns(cols))
+        .toBuffer();
+
+      const asyncWarns = warnSpy.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].includes('transform returned a Promise')
+      );
+      expect(asyncWarns).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+      process.env.NODE_ENV = origEnv;
+    }
+  });
+
+  it('async per-column transform still produces correct values', async () => {
+    const rows = [{ VAL: 'a' }, { VAL: 'b' }];
+    const cols = [{ key: 'VAL', transform: async (val: unknown) => String(val).toUpperCase() }];
+
+    const { buffer } = await OracleSqlToExcel()
+      .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'VAL' }])))
+      .sheet('S', (s) => s.sql('SELECT VAL FROM T').columns(cols))
+      .toBuffer();
+
+    const [{ rows: parsed }] = await readBuffer(buffer);
+    expect(parsed[0][0]).toBe('A');
+    expect(parsed[1][0]).toBe('B');
+  });
+
+  it('warns once in dev when row transform returns Promise', async () => {
+    const origEnv = process.env.NODE_ENV;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      process.env.NODE_ENV = 'development';
+
+      const rows = [{ A: 'x' }, { A: 'y' }];
+      const cols = [{ key: 'A' }];
+
+      await OracleSqlToExcel()
+        .connectionFactory(() => Promise.resolve(createStreamConn(rows, [{ name: 'A' }])))
+        .sheet('S', (s) => s
+          .sql('SELECT A FROM T')
+          .columns(cols)
+          .transform(async (row) => row)
+        )
+        .toBuffer();
+
+      const asyncWarns = warnSpy.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].includes('transform returned a Promise')
+      );
+      expect(asyncWarns).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+      process.env.NODE_ENV = origEnv;
+    }
+  });
+});
